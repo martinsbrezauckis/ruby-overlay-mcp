@@ -75,3 +75,9 @@ This package contains:
 - high-resolution frame datasets under `assets/frames`
 
 Frame assets are bundled locally, so the widget does not need to download images after installation.
+
+## License
+
+Source code, scripts, and MCP/widget implementation are licensed under the MIT License. See `LICENSE`.
+
+Ruby artwork and animation frame assets under `assets/frames` are licensed under Creative Commons Attribution-NonCommercial 4.0 International (`CC BY-NC 4.0`). See `ASSET-LICENSE.md`.
