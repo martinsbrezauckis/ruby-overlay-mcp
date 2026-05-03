@@ -1,4 +1,5 @@
 * text=auto
+.gitattributes text eol=lf
 
 *.png binary
 *.jpg binary
@@ -6,6 +7,8 @@
 *.webp binary
 
 *.command text eol=lf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
 *.sh text eol=lf
 *.swift text eol=lf
 *.py text eol=lf

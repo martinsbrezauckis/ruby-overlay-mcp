@@ -1,6 +1,6 @@
 # RubyOverlay
 
-Transparent desktop companion widget for Codex-style presentations.
+Ruby Overlay MCP is a transparent desktop companion widget with animated Ruby poses for Codex-style focus, motivation, and review workflows.
 
 RubyOverlay runs locally from the files in this folder. It uses high-resolution transparent PNG frame folders under `assets/frames` and can be controlled directly from the widget menu, from `control.json`, or through the included MCP server.
 
@@ -19,6 +19,7 @@ Useful examples:
 .\Run-RubyOverlay.cmd -Height 800 -State biker -Left 980 -Top 80
 .\Run-RubyOverlay.cmd -Height 800 -State party -Rotate -RotationIntervalMs 30000 -FrameIntervalMs 9000
 .\Run-RubyOverlay.cmd -ValidateOnly
+.\Install-RubyOverlayShortcut.ps1
 ```
 
 Right-click the widget to change the state, auto-rotation, rotation states, frame timing, scale, always-on-top mode, or to close it.
@@ -29,9 +30,10 @@ The macOS runner is source-based and requires Xcode Command Line Tools:
 
 ```bash
 xcode-select --install
-chmod +x macos/Run-RubyOverlay.command
+chmod +x macos/Run-RubyOverlay.command macos/Install-RubyOverlayShortcut.command
 ./macos/Run-RubyOverlay.command --validate-only
 ./macos/Run-RubyOverlay.command --state party --height 800 --rotate
+./macos/Install-RubyOverlayShortcut.command
 ```
 
 The included GitHub Actions workflow validates this macOS runner on a hosted macOS runner.
@@ -53,7 +55,7 @@ The included GitHub Actions workflow validates this macOS runner on a hosted mac
 
 ## MCP
 
-The MCP server is `mcp/ruby_overlay_mcp.py`. It exposes tools to launch the widget, list available states, read/write `control.json`, and read/write `rotation.json`.
+The MCP server is `mcp/ruby_overlay_mcp.py`. It exposes tools to launch the widget, list available states, read/write `control.json`, read/write `rotation.json`, check for GitHub release updates, and create desktop shortcuts.
 
 Example stdio command:
 
@@ -63,6 +65,18 @@ python mcp/ruby_overlay_mcp.py
 
 Use an absolute path to `mcp/ruby_overlay_mcp.py` when registering it in your MCP client.
 
+## Ruby Command
+
+The MCP tool `ruby` is the short command alias for launching RubyOverlay. If your MCP client supports custom slash-command aliases, map `/ruby` to the `ruby` tool. In clients that do not support custom slash commands, use a normal request such as `launch Ruby` or `call the ruby tool`; that avoids unknown-command errors.
+
+## Version And Updates
+
+The local version is stored in `VERSION`. Update settings and the most recent check result live in `update.json`.
+
+Use the MCP tool `ruby_overlay_check_update` to compare the local version with the latest GitHub release. When a newer release exists, the tool can update `control.json` so Ruby temporarily shows an update notice state in the live rotation.
+
+By default it looks for an `assets/frames/ruby-update` dataset. If that dataset is not installed yet, it falls back to `deploy` and then `party`. The default rotation list does not include `ruby-update`, so update artwork only appears when an update is available and the check tool applies the notice.
+
 ## What's Included
 
 This package contains:
@@ -71,6 +85,7 @@ This package contains:
 - macOS Swift/AppKit runner
 - Python MCP server
 - GitHub Actions macOS smoke workflow
+- Version/update metadata and shortcut installers
 - `control.json` and `rotation.json`
 - high-resolution frame datasets under `assets/frames`
 

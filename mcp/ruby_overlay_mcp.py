@@ -9,10 +9,14 @@ initialize, tools/list, and tools/call.
 from __future__ import annotations
 
 import argparse
+import datetime as _datetime
 import json
 import os
+import re
 import subprocess
 import sys
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import Any
 
@@ -20,8 +24,13 @@ from typing import Any
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONTROL_PATH = PROJECT_ROOT / "control.json"
 DEFAULT_ROTATION_CONFIG_PATH = PROJECT_ROOT / "rotation.json"
+DEFAULT_UPDATE_CONFIG_PATH = PROJECT_ROOT / "update.json"
+DEFAULT_VERSION_PATH = PROJECT_ROOT / "VERSION"
 DEFAULT_FRAME_ROOT = PROJECT_ROOT / "assets" / "frames"
 DEFAULT_LAUNCHER = PROJECT_ROOT / ("Run-RubyOverlay.cmd" if os.name == "nt" else "macos/Run-RubyOverlay.command")
+DEFAULT_REPOSITORY = "martinsbrezauckis/ruby-overlay-mcp"
+DEFAULT_UPDATE_STATE = "ruby-update"
+DEFAULT_UPDATE_FALLBACK_STATES = ["deploy", "party"]
 
 
 def write_response(message_id: Any, result: Any) -> None:
@@ -50,6 +59,12 @@ def read_json_object(path: Path) -> dict[str, Any]:
     if isinstance(data, dict):
         return data
     return {}
+
+
+def write_json_object(path: Path, value: dict[str, Any]) -> dict[str, Any]:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return value
 
 
 def write_control(control_path: Path, patch: dict[str, Any]) -> dict[str, Any]:
@@ -85,6 +100,128 @@ def list_states(frame_root: Path) -> list[str]:
     return states
 
 
+def read_current_version(version_path: Path = DEFAULT_VERSION_PATH) -> str:
+    if not version_path.exists():
+        return "0.0.0"
+    version = version_path.read_text(encoding="utf-8-sig").strip()
+    return version or "0.0.0"
+
+
+def version_parts(version: str) -> tuple[int, ...]:
+    raw = version.strip()
+    if raw.lower().startswith("v"):
+        raw = raw[1:]
+    raw = raw.split("+", 1)[0].split("-", 1)[0]
+    parts = []
+    for segment in raw.split("."):
+        match = re.match(r"(\d+)", segment)
+        parts.append(int(match.group(1)) if match else 0)
+    while len(parts) < 3:
+        parts.append(0)
+    return tuple(parts)
+
+
+def is_newer_version(latest_version: str, current_version: str) -> bool:
+    return version_parts(latest_version) > version_parts(current_version)
+
+
+def fetch_latest_release(repository: str) -> dict[str, Any]:
+    url = f"https://api.github.com/repos/{repository}/releases/latest"
+    request = urllib.request.Request(
+        url,
+        headers={
+            "Accept": "application/vnd.github+json",
+            "User-Agent": f"RubyOverlay/{read_current_version()}",
+            "X-GitHub-Api-Version": "2022-11-28",
+        },
+    )
+    with urllib.request.urlopen(request, timeout=12) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def check_for_update(
+    repository: str,
+    current_version: str,
+    fetch_latest_release=fetch_latest_release,
+) -> dict[str, Any]:
+    checked_at = _datetime.datetime.now(_datetime.UTC).replace(microsecond=0).isoformat()
+    try:
+        release = fetch_latest_release(repository)
+    except urllib.error.HTTPError as exc:
+        return {
+            "checkedAt": checked_at,
+            "currentVersion": current_version,
+            "error": f"GitHub release check failed: HTTP {exc.code}",
+            "latestVersion": None,
+            "releaseUrl": None,
+            "repository": repository,
+            "updateAvailable": False,
+        }
+    except Exception as exc:
+        return {
+            "checkedAt": checked_at,
+            "currentVersion": current_version,
+            "error": f"GitHub release check failed: {exc}",
+            "latestVersion": None,
+            "releaseUrl": None,
+            "repository": repository,
+            "updateAvailable": False,
+        }
+
+    latest_version = str(release.get("tag_name") or release.get("name") or "").strip()
+    if not latest_version:
+        return {
+            "checkedAt": checked_at,
+            "currentVersion": current_version,
+            "error": "Latest release did not include a tag_name.",
+            "latestVersion": None,
+            "releaseUrl": release.get("html_url"),
+            "repository": repository,
+            "updateAvailable": False,
+        }
+
+    return {
+        "checkedAt": checked_at,
+        "currentVersion": current_version,
+        "latestVersion": latest_version,
+        "releaseName": release.get("name"),
+        "releaseUrl": release.get("html_url"),
+        "repository": repository,
+        "updateAvailable": is_newer_version(latest_version, current_version),
+    }
+
+
+def updated_update_config(config: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
+    updated = dict(config)
+    if "repository" not in updated and result.get("repository"):
+        updated["repository"] = result["repository"]
+    updated["lastCheck"] = result
+    return updated
+
+
+def select_update_notice_states(
+    available_states: list[str],
+    current_rotation_states: list[str],
+    update_state: str,
+    fallback_states: list[str],
+) -> list[str]:
+    available = set(available_states)
+    notice_state = None
+    for candidate in [update_state, *fallback_states]:
+        if candidate in available:
+            notice_state = candidate
+            break
+
+    if notice_state is None:
+        return [state for state in current_rotation_states if state in available]
+
+    selected = [notice_state]
+    for state in current_rotation_states:
+        if state in available and state not in selected:
+            selected.append(state)
+    return selected
+
+
 def text_result(text: str) -> dict[str, Any]:
     return {"content": [{"type": "text", "text": text}]}
 
@@ -113,8 +250,69 @@ def add_launch_arg(command: list[str], launcher: Path, windows_name: str, posix_
         command.append(str(value))
 
 
+def create_desktop_shortcut(
+    project_root: Path,
+    launcher: Path,
+    name: str = "Ruby Overlay",
+    state: str = "party",
+    height: int = 800,
+    rotate: bool = True,
+) -> Path:
+    desktop = Path.home() / "Desktop"
+    desktop.mkdir(parents=True, exist_ok=True)
+    safe_name = "".join(ch for ch in name if ch not in '<>:"/\\|?*').strip() or "Ruby Overlay"
+
+    if os.name == "nt":
+        shortcut_path = desktop / f"{safe_name}.cmd"
+        arguments = f'-Height {int(height)} -State "{state}"'
+        if rotate:
+            arguments += " -Rotate"
+        shortcut_path.write_text(
+            f'@echo off\r\ncall "{launcher}" {arguments}\r\n',
+            encoding="utf-8",
+        )
+        return shortcut_path
+
+    shortcut_path = desktop / f"{safe_name}.command"
+    arguments = f'--height {int(height)} --state "{state}"'
+    if rotate:
+        arguments += " --rotate"
+    shortcut_path.write_text(
+        "#!/bin/zsh\n"
+        "set -e\n"
+        f'cd "{project_root}"\n'
+        f'exec "{launcher}" {arguments}\n',
+        encoding="utf-8",
+    )
+    shortcut_path.chmod(0o755)
+    return shortcut_path
+
+
+def launch_arguments_schema() -> dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": {
+            "state": {"type": "string", "description": "Initial RubyOverlay state/emotion name."},
+            "height": {"type": "integer", "minimum": 120, "maximum": 1600},
+            "left": {"type": "number"},
+            "top": {"type": "number"},
+            "animation_delay_multiplier": {"type": "number", "minimum": 0.25, "maximum": 10},
+            "rotate": {"type": "boolean"},
+            "rotation_states": {"type": "array", "items": {"type": "string"}},
+            "rotation_interval_ms": {"type": "integer", "minimum": 1500, "maximum": 60000},
+            "frame_interval_ms": {"type": "integer", "minimum": 500, "maximum": 60000},
+        },
+        "additionalProperties": False,
+    }
+
+
 def tool_schemas() -> list[dict[str, Any]]:
     return [
+        {
+            "name": "ruby",
+            "description": "Launch RubyOverlay. This is the short MCP command alias for user phrases like /ruby or launch Ruby.",
+            "inputSchema": launch_arguments_schema(),
+        },
         {
             "name": "ruby_overlay_list_states",
             "description": "List RubyOverlay states/emotions available from high-resolution frame folders.",
@@ -129,6 +327,37 @@ def tool_schemas() -> list[dict[str, Any]]:
             "name": "ruby_overlay_get_rotation",
             "description": "Read the persistent RubyOverlay rotation.json configuration.",
             "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+        },
+        {
+            "name": "ruby_overlay_check_update",
+            "description": "Check GitHub releases for a newer RubyOverlay version and optionally show an update-only state in the live rotation.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "repository": {
+                        "type": "string",
+                        "description": "GitHub repository in owner/name form.",
+                    },
+                    "current_version": {
+                        "type": "string",
+                        "description": "Override the local VERSION file for this check.",
+                    },
+                    "apply_notice": {
+                        "type": "boolean",
+                        "description": "When true, update control.json so Ruby shows an update notice state if a newer release exists.",
+                    },
+                    "update_state": {
+                        "type": "string",
+                        "description": "Preferred state folder to show only when an update is available.",
+                    },
+                    "fallback_states": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Fallback states to use when update_state images are not installed.",
+                    },
+                },
+                "additionalProperties": False,
+            },
         },
         {
             "name": "ruby_overlay_set_rotation",
@@ -174,18 +403,18 @@ def tool_schemas() -> list[dict[str, Any]]:
         {
             "name": "ruby_overlay_launch",
             "description": "Launch the RubyOverlay widget as a detached local window.",
+            "inputSchema": launch_arguments_schema(),
+        },
+        {
+            "name": "ruby_overlay_create_shortcut",
+            "description": "Create a desktop shortcut that launches RubyOverlay directly.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
+                    "name": {"type": "string", "description": "Shortcut file name without extension."},
                     "state": {"type": "string", "description": "Initial RubyOverlay state/emotion name."},
                     "height": {"type": "integer", "minimum": 120, "maximum": 1600},
-                    "left": {"type": "number"},
-                    "top": {"type": "number"},
-                    "animation_delay_multiplier": {"type": "number", "minimum": 0.25, "maximum": 10},
                     "rotate": {"type": "boolean"},
-                    "rotation_states": {"type": "array", "items": {"type": "string"}},
-                    "rotation_interval_ms": {"type": "integer", "minimum": 1500, "maximum": 60000},
-                    "frame_interval_ms": {"type": "integer", "minimum": 500, "maximum": 60000},
                 },
                 "additionalProperties": False,
             },
@@ -211,6 +440,44 @@ class RubyOverlayServer:
 
         if name == "ruby_overlay_get_rotation":
             return text_result(json.dumps(read_json_object(self.rotation_config_path), indent=2, sort_keys=True))
+
+        if name == "ruby_overlay_check_update":
+            update_config = read_json_object(DEFAULT_UPDATE_CONFIG_PATH)
+            repository = arguments.get("repository") or update_config.get("repository") or DEFAULT_REPOSITORY
+            current_version = arguments.get("current_version") or read_current_version()
+            result = check_for_update(str(repository), str(current_version))
+            write_json_object(DEFAULT_UPDATE_CONFIG_PATH, updated_update_config(update_config, result))
+
+            if result["updateAvailable"] and arguments.get("apply_notice", True):
+                update_state = str(arguments.get("update_state") or update_config.get("updateState") or DEFAULT_UPDATE_STATE)
+                fallback_states = arguments.get("fallback_states") or update_config.get("fallbackStates") or DEFAULT_UPDATE_FALLBACK_STATES
+                if not isinstance(fallback_states, list) or not all(isinstance(item, str) for item in fallback_states):
+                    raise ValueError("fallback_states must be an array of strings.")
+                rotation = read_json_object(self.rotation_config_path)
+                current_rotation_states = rotation.get("states", [])
+                if not isinstance(current_rotation_states, list):
+                    current_rotation_states = []
+                notice_states = select_update_notice_states(
+                    available_states,
+                    [str(state) for state in current_rotation_states],
+                    update_state,
+                    fallback_states,
+                )
+                if notice_states:
+                    write_control(
+                        self.control_path,
+                        {
+                            "state": notice_states[0],
+                            "rotate": True,
+                            "rotationStates": notice_states,
+                            "updateAvailable": True,
+                            "latestVersion": result["latestVersion"],
+                            "releaseUrl": result["releaseUrl"],
+                        },
+                    )
+                    result["noticeStates"] = notice_states
+
+            return text_result(json.dumps(result, indent=2, sort_keys=True))
 
         if name == "ruby_overlay_set_rotation":
             states_arg = arguments.get("states")
@@ -254,7 +521,7 @@ class RubyOverlayServer:
             current = write_control(self.control_path, patch)
             return text_result("RubyOverlay control updated:\n" + json.dumps(current, indent=2, sort_keys=True))
 
-        if name == "ruby_overlay_launch":
+        if name in {"ruby_overlay_launch", "ruby"}:
             if not self.launcher.exists():
                 raise FileNotFoundError(f"Launcher not found: {self.launcher}")
             command = launch_command_base(self.launcher)
@@ -308,6 +575,20 @@ class RubyOverlayServer:
             subprocess.Popen(command, **popen_kwargs)
             return text_result("RubyOverlay launched.")
 
+        if name == "ruby_overlay_create_shortcut":
+            state = arguments.get("state") or "party"
+            if state not in available_states:
+                raise ValueError(f"Unknown RubyOverlay state '{state}'.")
+            shortcut_path = create_desktop_shortcut(
+                PROJECT_ROOT,
+                self.launcher,
+                str(arguments.get("name") or "Ruby Overlay"),
+                str(state),
+                int(arguments.get("height") or 800),
+                bool(arguments.get("rotate", True)),
+            )
+            return text_result(f"RubyOverlay desktop shortcut created: {shortcut_path}")
+
         raise ValueError(f"Unknown tool: {name}")
 
 
@@ -323,7 +604,7 @@ def handle_message(server: RubyOverlayServer, message: dict[str, Any]) -> None:
             {
                 "protocolVersion": requested_version,
                 "capabilities": {"tools": {}},
-                "serverInfo": {"name": "ruby-overlay", "version": "0.1.0"},
+                "serverInfo": {"name": "ruby-overlay", "version": read_current_version()},
             },
         )
         return

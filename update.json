@@ -1,0 +1,8 @@
+{
+  "fallbackStates": [
+    "deploy",
+    "party"
+  ],
+  "repository": "martinsbrezauckis/ruby-overlay-mcp",
+  "updateState": "ruby-update"
+}

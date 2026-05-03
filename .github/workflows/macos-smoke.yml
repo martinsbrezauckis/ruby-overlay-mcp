@@ -31,6 +31,7 @@ jobs:
 
       - name: Smoke test MCP server
         run: |
+          python3 tests/test_ruby_overlay_mcp.py
           python3 -m py_compile mcp/ruby_overlay_mcp.py
           python3 - <<'PY'
           import json
@@ -57,6 +58,12 @@ jobs:
               {
                   "jsonrpc": "2.0",
                   "id": 3,
+                  "method": "tools/list",
+                  "params": {},
+              },
+              {
+                  "jsonrpc": "2.0",
+                  "id": 4,
                   "method": "tools/call",
                   "params": {"name": "ruby_overlay_get_rotation", "arguments": {}},
               },
@@ -72,8 +79,8 @@ jobs:
           )
 
           responses = [json.loads(line) for line in result.stdout.splitlines()]
-          if len(responses) != 3:
-              raise SystemExit(f"Expected 3 MCP responses, got {len(responses)}: {result.stdout}")
+          if len(responses) != 4:
+              raise SystemExit(f"Expected 4 MCP responses, got {len(responses)}: {result.stdout}")
 
           state_text = responses[1]["result"]["content"][0]["text"]
           states = json.loads(state_text)["states"]
@@ -82,7 +89,13 @@ jobs:
           if missing_states:
               raise SystemExit(f"Expected state(s) missing from MCP state list: {missing_states}; got {states}")
 
-          rotation_text = responses[2]["result"]["content"][0]["text"]
+          tool_names = {tool["name"] for tool in responses[2]["result"]["tools"]}
+          expected_tools = {"ruby", "ruby_overlay_check_update", "ruby_overlay_create_shortcut"}
+          missing_tools = sorted(expected_tools.difference(tool_names))
+          if missing_tools:
+              raise SystemExit(f"Expected MCP tool(s) missing: {missing_tools}; got {sorted(tool_names)}")
+
+          rotation_text = responses[3]["result"]["content"][0]["text"]
           rotation = json.loads(rotation_text)
           if rotation.get("frameIntervalMs") != 9000:
               raise SystemExit(f"Unexpected frameIntervalMs: {rotation}")
