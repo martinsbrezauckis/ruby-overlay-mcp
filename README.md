@@ -23,7 +23,7 @@ Useful examples:
 .\Install-RubyOverlayShortcut.ps1
 ```
 
-Right-click the widget to change the state, auto-rotation, rotation states, frame timing, scale, always-on-top mode, or to close it. State and rotation menus are grouped into Assistant and Cosplay submenus; rotation groups can be toggled on/off as a whole.
+Right-click the widget to change the state, auto-rotation, rotation states, frame timing, scale, always-on-top mode, create a desktop shortcut, or close it. State and rotation menus are grouped into Assistant and Cosplay submenus; rotation groups can be toggled on/off as a whole.
 
 ## macOS
 

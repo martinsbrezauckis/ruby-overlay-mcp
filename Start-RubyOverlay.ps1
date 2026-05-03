@@ -16,6 +16,8 @@ param(
     [string]$VersionPath = (Join-Path $PSScriptRoot "VERSION"),
     [string]$UpdateApiBaseUrl = "https://api.github.com",
     [switch]$DisableUpdateCheck,
+    [switch]$CreateShortcutAndExit,
+    [string]$ShortcutPath = "",
     [switch]$ValidateOnly,
     [int]$CloseAfterMs = 0
 )
@@ -559,6 +561,86 @@ function Write-RubyRotationLog {
         Add-Content -LiteralPath $script:rotationLogPath -Value "[$timestamp] $Message"
     } catch {
         # Logging is best-effort only.
+    }
+}
+
+function New-RubyDesktopShortcut {
+    param(
+        [string]$Name = "Ruby Overlay",
+        [string]$ShortcutState = "party",
+        [int]$ShortcutHeight = 800,
+        [bool]$ShortcutRotate = $true,
+        [string]$TargetPath = ""
+    )
+
+    $launcher = Join-Path $PSScriptRoot "Run-RubyOverlay.cmd"
+    if (-not (Test-Path -LiteralPath $launcher)) {
+        throw "Launcher not found: $launcher"
+    }
+
+    if ([string]::IsNullOrWhiteSpace($TargetPath)) {
+        $desktop = [Environment]::GetFolderPath("Desktop")
+        if ([string]::IsNullOrWhiteSpace($desktop)) {
+            $desktop = Join-Path $HOME "Desktop"
+        }
+        if (-not (Test-Path -LiteralPath $desktop)) {
+            New-Item -ItemType Directory -Force -Path $desktop | Out-Null
+        }
+
+        $safeName = ($Name -replace '[<>:"/\\|?*]', '').Trim()
+        if ([string]::IsNullOrWhiteSpace($safeName)) {
+            $safeName = "Ruby Overlay"
+        }
+        $TargetPath = Join-Path $desktop "$safeName.lnk"
+    } else {
+        $directory = Split-Path -Parent $TargetPath
+        if (-not [string]::IsNullOrWhiteSpace($directory) -and -not (Test-Path -LiteralPath $directory)) {
+            New-Item -ItemType Directory -Force -Path $directory | Out-Null
+        }
+    }
+
+    $arguments = "-Height $ShortcutHeight -State `"$ShortcutState`""
+    if ($ShortcutRotate) {
+        $arguments += " -Rotate"
+    }
+
+    if ([System.IO.Path]::GetExtension($TargetPath).Equals(".cmd", [System.StringComparison]::OrdinalIgnoreCase)) {
+        $content = "@echo off`r`ncall `"$launcher`" $arguments`r`n"
+        [System.IO.File]::WriteAllText($TargetPath, $content, [System.Text.UTF8Encoding]::new($false))
+        return $TargetPath
+    }
+
+    try {
+        $shell = New-Object -ComObject WScript.Shell
+        $shortcut = $shell.CreateShortcut($TargetPath)
+        $shortcut.TargetPath = $launcher
+        $shortcut.Arguments = $arguments
+        $shortcut.WorkingDirectory = $PSScriptRoot
+        $shortcut.Description = "Launch Ruby Overlay"
+        $shortcut.Save()
+        return $TargetPath
+    } catch {
+        $fallbackPath = [System.IO.Path]::ChangeExtension($TargetPath, ".cmd")
+        $content = "@echo off`r`ncall `"$launcher`" $arguments`r`n"
+        [System.IO.File]::WriteAllText($fallbackPath, $content, [System.Text.UTF8Encoding]::new($false))
+        return $fallbackPath
+    }
+}
+
+function Invoke-RubyCreateShortcut {
+    try {
+        $createdPath = New-RubyDesktopShortcut -ShortcutState $script:currentState -ShortcutHeight $script:currentHeight -ShortcutRotate $script:rotationEnabled -TargetPath $ShortcutPath
+        if ($null -ne $window) {
+            [void][System.Windows.MessageBox]::Show($window, "Created desktop shortcut:`n$createdPath", "Ruby Overlay")
+        } else {
+            Write-Host "Created desktop shortcut: $createdPath"
+        }
+    } catch {
+        if ($null -ne $window) {
+            [void][System.Windows.MessageBox]::Show($window, "Could not create desktop shortcut:`n$($_.Exception.Message)", "Ruby Overlay")
+        } else {
+            throw
+        }
     }
 }
 
@@ -1426,6 +1508,16 @@ function Start-RubyStartupUpdateCheck {
     }
 }
 
+if ($CreateShortcutAndExit) {
+    $shortcutShouldRotate = $true
+    if ($PSBoundParameters.ContainsKey("Rotate")) {
+        $shortcutShouldRotate = [bool]$Rotate
+    }
+    $createdPath = New-RubyDesktopShortcut -ShortcutState $script:currentState -ShortcutHeight $script:currentHeight -ShortcutRotate $shortcutShouldRotate -TargetPath $ShortcutPath
+    Write-Host "Created desktop shortcut: $createdPath"
+    return
+}
+
 Load-RubyRotationConfig
 if ($PSBoundParameters.ContainsKey("RotationIntervalMs") -and $RotationIntervalMs -gt 0) {
     Set-RubyRotationInterval -IntervalMs $RotationIntervalMs
@@ -1597,6 +1689,11 @@ $script:topmostItem.Add_Click({
     $window.Topmost = $script:topmostItem.IsChecked
 })
 [void]$contextMenu.Items.Add($script:topmostItem)
+
+$shortcutItem = New-Object System.Windows.Controls.MenuItem
+$shortcutItem.Header = "Create desktop shortcut"
+$shortcutItem.Add_Click({ Invoke-RubyCreateShortcut })
+[void]$contextMenu.Items.Add($shortcutItem)
 
 $closeItem = New-Object System.Windows.Controls.MenuItem
 $closeItem.Header = "Close"

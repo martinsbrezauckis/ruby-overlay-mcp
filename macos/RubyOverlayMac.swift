@@ -1020,6 +1020,10 @@ final class RubyOverlayController: NSObject, NSApplicationDelegate {
         topmost.state = window?.level == .floating ? .on : .off
         menu.addItem(topmost)
 
+        let shortcut = NSMenuItem(title: "Create desktop shortcut", action: #selector(createDesktopShortcut), keyEquivalent: "")
+        shortcut.target = self
+        menu.addItem(shortcut)
+
         let close = NSMenuItem(title: "Close", action: #selector(closeOverlay), keyEquivalent: "")
         close.target = self
         menu.addItem(close)
@@ -1116,6 +1120,47 @@ final class RubyOverlayController: NSObject, NSApplicationDelegate {
     @objc private func toggleTopmost(_ sender: NSMenuItem) {
         guard let overlayWindow = window else { return }
         overlayWindow.level = overlayWindow.level == .floating ? .normal : .floating
+    }
+
+    @objc private func createDesktopShortcut() {
+        do {
+            let shortcutPath = try writeDesktopShortcut()
+            let alert = NSAlert()
+            alert.messageText = "Desktop shortcut created"
+            alert.informativeText = shortcutPath.path
+            alert.runModal()
+        } catch {
+            let alert = NSAlert(error: error)
+            alert.messageText = "Could not create desktop shortcut"
+            alert.runModal()
+        }
+    }
+
+    private func writeDesktopShortcut() throws -> URL {
+        let desktop = fileManager.homeDirectoryForCurrentUser.appendingPathComponent("Desktop", isDirectory: true)
+        try fileManager.createDirectory(at: desktop, withIntermediateDirectories: true)
+        let shortcutPath = desktop.appendingPathComponent("Ruby Overlay.command")
+        var arguments = "--height \(currentHeight) --state \(shellQuote(currentState))"
+        if rotationEnabled {
+            arguments += " --rotate"
+        }
+        let launcher = args.projectRoot
+            .appendingPathComponent("macos", isDirectory: true)
+            .appendingPathComponent("Run-RubyOverlay.command")
+        let content = """
+        #!/bin/zsh
+        set -e
+        cd \(shellQuote(args.projectRoot.path))
+        exec \(shellQuote(launcher.path)) \(arguments)
+
+        """
+        try content.write(to: shortcutPath, atomically: true, encoding: .utf8)
+        try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: shortcutPath.path)
+        return shortcutPath
+    }
+
+    private func shellQuote(_ value: String) -> String {
+        "'\(value.replacingOccurrences(of: "'", with: "'\\''"))'"
     }
 
     @objc private func closeOverlay() {
