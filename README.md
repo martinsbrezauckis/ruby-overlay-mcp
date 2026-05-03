@@ -18,12 +18,15 @@ Useful examples:
 .\Run-RubyOverlay.cmd -Height 800 -State party -Rotate
 .\Run-RubyOverlay.cmd -Height 800 -State biker -Left 980 -Top 80
 .\Run-RubyOverlay.cmd -Height 800 -State party -Rotate -RotationIntervalMs 30000 -FrameIntervalMs 9000
+.\Run-RubyOverlay.cmd -Mode dance -DanceState "dance-samba" -DanceFrameIntervalMs 750
 .\Run-RubyOverlay.cmd -DisableUpdateCheck
 .\Run-RubyOverlay.cmd -ValidateOnly
 .\Install-RubyOverlayShortcut.ps1
 ```
 
-Right-click the widget to change the state, auto-rotation, rotation states, frame timing, scale, always-on-top mode, create a desktop shortcut, or close it. State and rotation menus are grouped into Assistant and Cosplay submenus; rotation groups can be toggled on/off as a whole.
+Right-click the widget to change the state, Assistant/Dance mode, selected dance set, dance speed, auto-rotation, rotation states, frame timing, scale, always-on-top mode, create a desktop shortcut, or close it. State menus are grouped into Assistant, Cosplay, and Dance submenus. Dance sets are detected from folder names beginning with `dance-` or `dance ` and stay out of normal assistant rotation.
+
+Windows `.lnk` shortcuts created by the installer, widget menu, or MCP use `assets/ruby-icon.ico` and launch through hidden detached PowerShell, so closing the launcher prompt does not close RubyOverlay.
 
 ## macOS
 
@@ -34,6 +37,7 @@ xcode-select --install
 chmod +x macos/Run-RubyOverlay.command macos/Install-RubyOverlayShortcut.command
 ./macos/Run-RubyOverlay.command --validate-only
 ./macos/Run-RubyOverlay.command --state party --height 800 --rotate
+./macos/Run-RubyOverlay.command --mode dance --dance-state "dance-samba" --dance-frame-interval-ms 750
 ./macos/Run-RubyOverlay.command --disable-update-check
 ./macos/Install-RubyOverlayShortcut.command
 ```
@@ -49,15 +53,18 @@ The included GitHub Actions workflow validates this macOS runner on a hosted mac
   "enabled": true,
   "intervalMs": 30000,
   "frameIntervalMs": 9000,
+  "mode": "assistant",
+  "danceState": "",
+  "danceFrameIntervalMs": 750,
   "states": ["party", "belly dance", "samba", "biker", "idle"]
 }
 ```
 
-`intervalMs` is the delay between dataset/state changes. `frameIntervalMs` is the delay between individual images inside a dataset.
+`intervalMs` is the delay between dataset/state changes. `frameIntervalMs` is the delay between individual images inside a normal dataset. `danceFrameIntervalMs` is the faster frame delay used while Dance mode loops a dance set.
 
 ## MCP
 
-The MCP server is `mcp/ruby_overlay_mcp.py`. It exposes tools to launch the widget, list available states, read/write `control.json`, read/write `rotation.json`, check for GitHub release/tag updates, and create desktop shortcuts.
+The MCP server is `mcp/ruby_overlay_mcp.py`. It exposes tools to launch the widget, list available states, switch Assistant/Dance mode, read/write `control.json`, read/write `rotation.json`, check for GitHub release/tag updates, and create desktop shortcuts.
 
 Example stdio command:
 
@@ -91,6 +98,7 @@ This package contains:
 - GitHub Actions macOS smoke workflow
 - Version/update metadata and shortcut installers
 - `control.json` and `rotation.json`
+- Ruby shortcut/window icon assets
 - high-resolution frame datasets under `assets/frames`
 
 Frame assets are bundled locally, so the widget does not need to download images after installation.
@@ -99,4 +107,4 @@ Frame assets are bundled locally, so the widget does not need to download images
 
 Source code, scripts, and MCP/widget implementation are licensed under the MIT License. See `LICENSE`.
 
-Ruby artwork and animation frame assets under `assets/frames` are licensed under Creative Commons Attribution-NonCommercial 4.0 International (`CC BY-NC 4.0`). See `ASSET-LICENSE.md`.
+Ruby artwork, icon assets, and animation frame assets under `assets` are licensed under Creative Commons Attribution-NonCommercial 4.0 International (`CC BY-NC 4.0`). See `ASSET-LICENSE.md`.

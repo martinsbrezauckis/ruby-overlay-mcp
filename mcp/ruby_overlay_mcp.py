@@ -13,6 +13,7 @@ import datetime as _datetime
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import urllib.error
@@ -342,6 +343,36 @@ def validate_state_names(state_names: list[str], available_states: list[str]) ->
         raise ValueError(f"Unknown RubyOverlay state(s): {', '.join(unknown)}.")
 
 
+def normalize_mode(value: Any) -> str:
+    mode = str(value or "assistant").strip().lower()
+    if mode not in {"assistant", "dance"}:
+        raise ValueError("mode must be either 'assistant' or 'dance'.")
+    return mode
+
+
+def list_dance_states(available_states: list[str]) -> list[str]:
+    return [
+        state
+        for state in available_states
+        if state.lower().startswith("dance-") or state.lower().startswith("dance ")
+    ]
+
+
+def resolve_dance_state(dance_state: Any, available_states: list[str]) -> str:
+    if dance_state is not None:
+        selected = str(dance_state).strip()
+        validate_state_names([selected], available_states)
+        if selected not in list_dance_states(available_states):
+            raise ValueError("dance_state must be a state folder beginning with 'dance-' or 'dance '.")
+        return selected
+
+    dance_states = list_dance_states(available_states)
+    if dance_states:
+        return dance_states[0]
+
+    raise ValueError("Dance mode needs a dance_state, such as 'dance-samba'.")
+
+
 def is_windows_launcher(launcher: Path) -> bool:
     return launcher.suffix.lower() in {".cmd", ".bat", ".ps1"}
 
@@ -373,15 +404,51 @@ def create_desktop_shortcut(
     safe_name = "".join(ch for ch in name if ch not in '<>:"/\\|?*').strip() or "Ruby Overlay"
 
     if os.name == "nt":
-        shortcut_path = desktop / f"{safe_name}.cmd"
+        shortcut_path = desktop / f"{safe_name}.lnk"
+        script_path = project_root / "Start-RubyOverlay.ps1"
         arguments = f'-Height {int(height)} -State "{state}"'
         if rotate:
             arguments += " -Rotate"
-        shortcut_path.write_text(
-            f'@echo off\r\ncall "{launcher}" {arguments}\r\n',
+        powershell_arguments = (
+            f'-NoProfile -STA -ExecutionPolicy Bypass -WindowStyle Hidden '
+            f'-File "{script_path}" {arguments}'
+        )
+        icon_path = project_root / "assets" / "ruby-icon.ico"
+        if shutil.which("powershell.exe"):
+            def quote(value: Path | str) -> str:
+                return "'" + str(value).replace("'", "''") + "'"
+
+            script = "\n".join(
+                [
+                    f"$shortcutPath = {quote(shortcut_path)}",
+                    f"$workingDirectory = {quote(project_root)}",
+                    f"$arguments = {quote(powershell_arguments)}",
+                    f"$iconPath = {quote(icon_path)}",
+                    "$shell = New-Object -ComObject WScript.Shell",
+                    "$shortcut = $shell.CreateShortcut($shortcutPath)",
+                    "$shortcut.TargetPath = 'powershell.exe'",
+                    "$shortcut.Arguments = $arguments",
+                    "$shortcut.WorkingDirectory = $workingDirectory",
+                    "$shortcut.Description = 'Launch Ruby Overlay'",
+                    "$shortcut.WindowStyle = 7",
+                    "if (Test-Path -LiteralPath $iconPath) { $shortcut.IconLocation = \"$iconPath,0\" }",
+                    "$shortcut.Save()",
+                ]
+            )
+            subprocess.run(
+                ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
+                check=True,
+                text=True,
+                capture_output=True,
+            )
+            return shortcut_path
+
+        command_path = desktop / f"{safe_name}.cmd"
+        command_path.write_text(
+            f'@echo off\r\nstart "" powershell.exe {powershell_arguments}\r\n',
             encoding="utf-8",
         )
-        return shortcut_path
+        return command_path
 
     shortcut_path = desktop / f"{safe_name}.command"
     arguments = f'--height {int(height)} --state "{state}"'
@@ -391,7 +458,7 @@ def create_desktop_shortcut(
         "#!/bin/zsh\n"
         "set -e\n"
         f'cd "{project_root}"\n'
-        f'exec "{launcher}" {arguments}\n',
+        f'nohup "{launcher}" {arguments} >/dev/null 2>&1 &\n',
         encoding="utf-8",
     )
     shortcut_path.chmod(0o755)
@@ -408,6 +475,9 @@ def launch_arguments_schema() -> dict[str, Any]:
             "top": {"type": "number"},
             "animation_delay_multiplier": {"type": "number", "minimum": 0.25, "maximum": 10},
             "rotate": {"type": "boolean"},
+            "mode": {"type": "string", "enum": ["assistant", "dance"]},
+            "dance_state": {"type": "string", "description": "State folder to loop while Dance mode is active."},
+            "dance_frame_interval_ms": {"type": "integer", "minimum": 250, "maximum": 60000},
             "rotation_states": {"type": "array", "items": {"type": "string"}},
             "rotation_interval_ms": {"type": "integer", "minimum": 1500, "maximum": 60000},
             "frame_interval_ms": {"type": "integer", "minimum": 500, "maximum": 60000},
@@ -489,11 +559,14 @@ def tool_schemas() -> list[dict[str, Any]]:
         },
         {
             "name": "ruby_overlay_set_control",
-            "description": "Set RubyOverlay state, display height, window position, topmost flag, or live rotation controls.",
+            "description": "Set RubyOverlay state, display height, window position, topmost flag, mode, or live rotation controls.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "state": {"type": "string", "description": "RubyOverlay state/emotion name."},
+                    "mode": {"type": "string", "enum": ["assistant", "dance"]},
+                    "dance_state": {"type": "string", "description": "State folder to loop while Dance mode is active."},
+                    "dance_frame_interval_ms": {"type": "integer", "minimum": 250, "maximum": 60000},
                     "height": {"type": "integer", "minimum": 120, "maximum": 1600},
                     "left": {"type": "number", "description": "Window left coordinate in desktop pixels."},
                     "top": {"type": "number", "description": "Window top coordinate in desktop pixels."},
@@ -507,6 +580,22 @@ def tool_schemas() -> list[dict[str, Any]]:
                     "rotation_interval_ms": {"type": "integer", "minimum": 1500, "maximum": 60000},
                     "frame_interval_ms": {"type": "integer", "minimum": 500, "maximum": 60000},
                 },
+                "additionalProperties": False,
+            },
+        },
+        {
+            "name": "ruby_overlay_set_mode",
+            "description": "Switch RubyOverlay between Assistant mode and Dance mode. Use for phrases like /ruby dance, Ruby dance mode, or Ruby assistant mode.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "mode": {"type": "string", "enum": ["assistant", "dance"]},
+                    "dance_state": {"type": "string", "description": "State folder to loop while Dance mode is active."},
+                    "dance_frame_interval_ms": {"type": "integer", "minimum": 250, "maximum": 60000},
+                    "state": {"type": "string", "description": "Optional assistant state to show when returning to Assistant mode."},
+                    "rotate": {"type": "boolean", "description": "Optional Auto rotate setting when returning to Assistant mode."},
+                },
+                "required": ["mode"],
                 "additionalProperties": False,
             },
         },
@@ -642,6 +731,14 @@ class RubyOverlayServer:
             state = arguments.get("state")
             if state is not None and state not in available_states:
                 raise ValueError(f"Unknown RubyOverlay state '{state}'.")
+            mode = arguments.get("mode")
+            if mode is not None:
+                mode = normalize_mode(mode)
+            dance_state = arguments.get("dance_state")
+            if dance_state is not None:
+                dance_state = resolve_dance_state(dance_state, available_states)
+                if state is None and mode == "dance":
+                    state = dance_state
             rotation_states = arguments.get("rotation_states")
             if rotation_states is not None:
                 if not isinstance(rotation_states, list) or not all(isinstance(item, str) for item in rotation_states):
@@ -649,8 +746,12 @@ class RubyOverlayServer:
                 validate_state_names(rotation_states, available_states)
             rotation_interval_ms = arguments.get("rotation_interval_ms")
             frame_interval_ms = arguments.get("frame_interval_ms")
+            dance_frame_interval_ms = arguments.get("dance_frame_interval_ms")
             patch = {
+                "mode": mode,
                 "state": state,
+                "danceState": dance_state,
+                "danceFrameIntervalMs": int(dance_frame_interval_ms) if dance_frame_interval_ms is not None else None,
                 "height": arguments.get("height"),
                 "left": arguments.get("left"),
                 "top": arguments.get("top"),
@@ -663,15 +764,59 @@ class RubyOverlayServer:
             current = write_control(self.control_path, patch)
             return text_result("RubyOverlay control updated:\n" + json.dumps(current, indent=2, sort_keys=True))
 
+        if name == "ruby_overlay_set_mode":
+            mode = normalize_mode(arguments.get("mode"))
+            patch: dict[str, Any] = {"mode": mode}
+
+            if mode == "dance":
+                dance_state = resolve_dance_state(arguments.get("dance_state"), available_states)
+                dance_frame_interval_ms = arguments.get("dance_frame_interval_ms")
+                patch.update(
+                    {
+                        "state": dance_state,
+                        "danceState": dance_state,
+                        "danceFrameIntervalMs": int(dance_frame_interval_ms)
+                        if dance_frame_interval_ms is not None
+                        else None,
+                        "rotate": False,
+                    }
+                )
+            else:
+                state = arguments.get("state")
+                if state is not None:
+                    validate_state_names([str(state)], available_states)
+                    patch["state"] = str(state)
+                if arguments.get("rotate") is not None:
+                    patch["rotate"] = bool(arguments["rotate"])
+
+            current = write_control(self.control_path, patch)
+            return text_result("RubyOverlay mode updated:\n" + json.dumps(current, indent=2, sort_keys=True))
+
         if name in {"ruby_overlay_launch", "ruby"}:
             if not self.launcher.exists():
                 raise FileNotFoundError(f"Launcher not found: {self.launcher}")
             command = launch_command_base(self.launcher)
+            mode = arguments.get("mode")
+            if mode is not None:
+                mode = normalize_mode(mode)
+                add_launch_arg(command, self.launcher, "-Mode", "--mode", mode)
             state = arguments.get("state")
             if state is not None:
                 if state not in available_states:
                     raise ValueError(f"Unknown RubyOverlay state '{state}'.")
                 add_launch_arg(command, self.launcher, "-State", "--state", state)
+            dance_state = arguments.get("dance_state")
+            if dance_state is not None:
+                dance_state = resolve_dance_state(dance_state, available_states)
+                add_launch_arg(command, self.launcher, "-DanceState", "--dance-state", dance_state)
+            if arguments.get("dance_frame_interval_ms") is not None:
+                add_launch_arg(
+                    command,
+                    self.launcher,
+                    "-DanceFrameIntervalMs",
+                    "--dance-frame-interval-ms",
+                    int(arguments["dance_frame_interval_ms"]),
+                )
             if arguments.get("height") is not None:
                 add_launch_arg(command, self.launcher, "-Height", "--height", int(arguments["height"]))
             if arguments.get("left") is not None:

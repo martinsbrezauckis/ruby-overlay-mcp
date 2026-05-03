@@ -2,9 +2,9 @@
 
 Copyright (c) 2026 martinsbrezauckis.
 
-The Ruby artwork and animation frame assets under `assets/frames` are licensed
-under Creative Commons Attribution-NonCommercial 4.0 International
-(`CC BY-NC 4.0`).
+The Ruby artwork and animation assets under `assets/frames`, plus the Ruby icon
+assets `assets/ruby-icon.png` and `assets/ruby-icon.ico`, are licensed under
+Creative Commons Attribution-NonCommercial 4.0 International (`CC BY-NC 4.0`).
 
 You may share and adapt the artwork for non-commercial purposes with
 attribution. Commercial use requires prior written permission from the

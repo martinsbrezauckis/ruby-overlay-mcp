@@ -34,6 +34,83 @@ class GitHubStub(http.server.BaseHTTPRequestHandler):
 
 @unittest.skipUnless(os.name == "nt" and shutil.which("powershell.exe"), "Windows WPF startup test")
 class WindowsStartupUpdateTests(unittest.TestCase):
+    def test_macos_source_exposes_dance_mode_controls(self):
+        source = (REPO_ROOT / "macos" / "RubyOverlayMac.swift").read_text(encoding="utf-8")
+
+        self.assertIn("var mode = \"assistant\"", source)
+        self.assertIn("var danceState", source)
+        self.assertIn("var danceFrameIntervalMs", source)
+        self.assertIn("case \"--mode\"", source)
+        self.assertIn("Dance mode", source)
+        self.assertIn("Assistant mode", source)
+        self.assertIn("nohup", source)
+
+        installer = (REPO_ROOT / "macos" / "Install-RubyOverlayShortcut.command").read_text(encoding="utf-8")
+        self.assertIn("nohup", installer)
+
+    def test_widget_script_exposes_dance_mode_controls(self):
+        script = (REPO_ROOT / "Start-RubyOverlay.ps1").read_text(encoding="utf-8")
+
+        self.assertIn("[string]$Mode", script)
+        self.assertIn("[string]$DanceState", script)
+        self.assertIn("[int]$DanceFrameIntervalMs", script)
+        self.assertIn("Dance mode", script)
+        self.assertIn("Assistant mode", script)
+        self.assertIn("ruby-icon.ico", script)
+        self.assertIn("IconLocation", script)
+
+        installer = (REPO_ROOT / "Install-RubyOverlayShortcut.ps1").read_text(encoding="utf-8")
+        self.assertIn("ruby-icon.ico", installer)
+        self.assertIn("IconLocation", installer)
+
+    def test_widget_accepts_dance_mode_launch_arguments(self):
+        temp_root = REPO_ROOT / ".test-tmp" / "dance-startup"
+        if temp_root.exists():
+            shutil.rmtree(temp_root)
+        temp_root.mkdir(parents=True)
+        try:
+            source_frame = next((REPO_ROOT / "assets" / "frames" / "samba").glob("*.png"))
+            frame_root = temp_root / "frames"
+            dance_dir = frame_root / "dance-test"
+            dance_dir.mkdir(parents=True)
+            shutil.copy2(source_frame, dance_dir / "001.png")
+
+            result = subprocess.run(
+                [
+                    "powershell.exe",
+                    "-NoProfile",
+                    "-STA",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    str(REPO_ROOT / "Start-RubyOverlay.ps1"),
+                    "-FrameRoot",
+                    str(frame_root),
+                    "-State",
+                    "dance-test",
+                    "-Mode",
+                    "dance",
+                    "-DanceState",
+                    "dance-test",
+                    "-DanceFrameIntervalMs",
+                    "750",
+                    "-Height",
+                    "240",
+                    "-CloseAfterMs",
+                    "1000",
+                    "-DisableUpdateCheck",
+                ],
+                cwd=REPO_ROOT,
+                text=True,
+                capture_output=True,
+                timeout=20,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+        finally:
+            if temp_root.exists():
+                shutil.rmtree(temp_root)
+
     def test_startup_update_check_writes_update_notice_control(self):
         server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), GitHubStub)
         thread = threading.Thread(target=server.serve_forever, daemon=True)

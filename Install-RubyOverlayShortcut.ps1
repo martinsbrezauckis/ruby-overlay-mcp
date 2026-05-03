@@ -8,10 +8,11 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-$launcher = Join-Path $PSScriptRoot "Run-RubyOverlay.cmd"
-if (-not (Test-Path -LiteralPath $launcher)) {
-    throw "Launcher not found: $launcher"
+$scriptPath = Join-Path $PSScriptRoot "Start-RubyOverlay.ps1"
+if (-not (Test-Path -LiteralPath $scriptPath)) {
+    throw "Overlay script not found: $scriptPath"
 }
+$iconPath = Join-Path $PSScriptRoot "assets\ruby-icon.ico"
 
 $desktop = [Environment]::GetFolderPath("Desktop")
 if ([string]::IsNullOrWhiteSpace($desktop)) {
@@ -26,24 +27,29 @@ if ([string]::IsNullOrWhiteSpace($safeName)) {
     $safeName = "Ruby Overlay"
 }
 
-$arguments = "-Height $Height -State `"$State`""
+$overlayArguments = "-Height $Height -State `"$State`""
 if (-not $NoRotate) {
-    $arguments += " -Rotate"
+    $overlayArguments += " -Rotate"
 }
+$powershellArguments = "-NoProfile -STA -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$scriptPath`" $overlayArguments"
+$commandContent = "@echo off`r`nstart `"`" powershell.exe $powershellArguments`r`n"
 
 try {
     $shortcutPath = Join-Path $desktop "$safeName.lnk"
     $shell = New-Object -ComObject WScript.Shell
     $shortcut = $shell.CreateShortcut($shortcutPath)
-    $shortcut.TargetPath = $launcher
-    $shortcut.Arguments = $arguments
+    $shortcut.TargetPath = "powershell.exe"
+    $shortcut.Arguments = $powershellArguments
     $shortcut.WorkingDirectory = $PSScriptRoot
     $shortcut.Description = "Launch Ruby Overlay"
+    $shortcut.WindowStyle = 7
+    if (Test-Path -LiteralPath $iconPath) {
+        $shortcut.IconLocation = "$iconPath,0"
+    }
     $shortcut.Save()
     Write-Host "Created desktop shortcut: $shortcutPath"
 } catch {
     $shortcutPath = Join-Path $desktop "$safeName.cmd"
-    $content = "@echo off`r`ncall `"$launcher`" $arguments`r`n"
-    [System.IO.File]::WriteAllText($shortcutPath, $content, [System.Text.UTF8Encoding]::new($false))
+    [System.IO.File]::WriteAllText($shortcutPath, $commandContent, [System.Text.UTF8Encoding]::new($false))
     Write-Host "Created desktop command shortcut: $shortcutPath"
 }

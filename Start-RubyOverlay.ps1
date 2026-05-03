@@ -9,6 +9,9 @@ param(
     [string]$ControlPath = (Join-Path $PSScriptRoot "control.json"),
     [string]$RotationConfigPath = (Join-Path $PSScriptRoot "rotation.json"),
     [switch]$Rotate,
+    [string]$Mode = "assistant",
+    [string]$DanceState = "",
+    [int]$DanceFrameIntervalMs = 900,
     [string]$RotateStates = "",
     [int]$RotationIntervalMs = 0,
     [int]$FrameIntervalMs = 9000,
@@ -83,8 +86,17 @@ $script:rotationEnabled = $false
 $script:rotationStates = New-Object System.Collections.Generic.List[string]
 $script:rotationCycleIntervalMs = 9000
 $script:frameIntervalMs = [Math]::Max(500, [Math]::Min(60000, $FrameIntervalMs))
+$script:mode = "assistant"
+$script:assistantState = $State
+$script:assistantRotationEnabled = $false
+$script:danceState = ""
+$script:danceFrameIntervalMs = [Math]::Max(250, [Math]::Min(60000, $DanceFrameIntervalMs))
 $script:rotationTimer = $null
 $script:rotateItem = $null
+$script:modeItems = @{}
+$script:danceStateItems = @{}
+$script:danceIntervalItems = @{}
+$script:danceCurrentItem = $null
 $script:rotationStateItems = @{}
 $script:rotationGroupItems = @{}
 $script:rotationIntervalItems = @{}
@@ -92,6 +104,8 @@ $script:rotationCurrentItem = $null
 $script:frameIntervalItems = @{}
 $script:frameCurrentItem = $null
 $script:rotationLogPath = Join-Path $PSScriptRoot "output\rotation.log"
+$script:rubyIconPngPath = Join-Path $PSScriptRoot "assets\ruby-icon.png"
+$script:rubyIconIcoPath = Join-Path $PSScriptRoot "assets\ruby-icon.ico"
 $frameCache = @{}
 $supportedFrameExtensions = @(".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff")
 
@@ -119,6 +133,23 @@ function Import-RubyBitmap {
     $image.EndInit()
     $image.Freeze()
     return $image
+}
+
+function Get-RubyWindowIconPath {
+    if (Test-Path -LiteralPath $script:rubyIconPngPath) {
+        return $script:rubyIconPngPath
+    }
+    if (Test-Path -LiteralPath $script:rubyIconIcoPath) {
+        return $script:rubyIconIcoPath
+    }
+    return ""
+}
+
+function Get-RubyShortcutIconPath {
+    if (Test-Path -LiteralPath $script:rubyIconIcoPath) {
+        return $script:rubyIconIcoPath
+    }
+    return ""
 }
 
 $atlasBitmap = $null
@@ -215,6 +246,10 @@ function Get-RubyFrameDelayMs {
         [int]$FrameIndex
     )
 
+    if ($script:mode -eq "dance" -and (Test-RubyDanceState -StateName $FrameState)) {
+        return [int]$script:danceFrameIntervalMs
+    }
+
     if ($script:frameSources[$FrameState].Kind -eq "frames") {
         return [int]$script:frameIntervalMs
     }
@@ -276,6 +311,48 @@ function Get-RubyVisibleStateNames {
     return [string[]]$visible.ToArray()
 }
 
+function Get-RubyNormalizedMode {
+    param([string]$Value)
+
+    $normalized = $Value.Trim().ToLowerInvariant()
+    if ($normalized -eq "dance") {
+        return "dance"
+    }
+
+    return "assistant"
+}
+
+function Test-RubyDanceState {
+    param([string]$StateName)
+
+    $normalized = $StateName.Trim().ToLowerInvariant()
+    return $normalized.StartsWith("dance-") -or $normalized.StartsWith("dance ")
+}
+
+function Get-RubyDanceStateNames {
+    $result = New-Object System.Collections.Generic.List[string]
+    foreach ($name in $states.Keys) {
+        if ($script:frameSources.ContainsKey($name) -and (Test-RubyDanceState -StateName $name)) {
+            $result.Add([string]$name)
+        }
+    }
+
+    return [string[]]$result.ToArray()
+}
+
+function Get-RubyDefaultDanceState {
+    if (-not [string]::IsNullOrWhiteSpace($script:danceState) -and $states.Contains($script:danceState)) {
+        return $script:danceState
+    }
+
+    $danceStates = @(Get-RubyDanceStateNames)
+    if ($danceStates.Count -gt 0) {
+        return [string]$danceStates[0]
+    }
+
+    return ""
+}
+
 function Test-RubyUpdateOnlyState {
     param([string]$StateName)
 
@@ -322,11 +399,18 @@ function Remove-RubyUpdateOnlyStates {
 }
 
 function Get-RubyVisibleRotationStateNames {
-    return [string[]]@(Remove-RubyUpdateOnlyStates -StateNames $script:visibleStateNames)
+    return [string[]]@(
+        Remove-RubyUpdateOnlyStates -StateNames $script:visibleStateNames |
+            Where-Object { -not (Test-RubyDanceState -StateName $_) }
+    )
 }
 
 function Get-RubyStateGroupName {
     param([string]$StateName)
+
+    if (Test-RubyDanceState -StateName $StateName) {
+        return "Dance"
+    }
 
     $cosplayStates = @(
         "angel",
@@ -354,6 +438,7 @@ function Get-RubyGroupedStateNames {
     $groups = [ordered]@{
         "Assistant" = New-Object System.Collections.Generic.List[string]
         "Cosplay" = New-Object System.Collections.Generic.List[string]
+        "Dance" = New-Object System.Collections.Generic.List[string]
     }
 
     foreach ($name in @(ConvertTo-RubyStateNames -Value $StateNames)) {
@@ -390,9 +475,14 @@ if ($ValidateOnly) {
 $script:visibleStateNames = @(Get-RubyVisibleStateNames)
 $script:visibleRotationStateNames = @(Get-RubyVisibleRotationStateNames)
 $script:stateShortcutNames = @($script:visibleStateNames | Select-Object -First 9)
+$script:danceState = if (-not [string]::IsNullOrWhiteSpace($DanceState) -and $states.Contains($DanceState)) { $DanceState } else { Get-RubyDefaultDanceState }
 
 $window = New-Object System.Windows.Window
 $window.Title = "Ruby Overlay"
+$windowIconPath = Get-RubyWindowIconPath
+if (-not [string]::IsNullOrWhiteSpace($windowIconPath)) {
+    $window.Icon = Import-RubyBitmap -Path $windowIconPath
+}
 $window.WindowStyle = [System.Windows.WindowStyle]::None
 $window.ResizeMode = [System.Windows.ResizeMode]::NoResize
 $window.AllowsTransparency = $true
@@ -437,6 +527,9 @@ function Set-RubyState {
         return
     }
     $script:currentState = $NewState
+    if ($script:mode -eq "assistant" -and -not (Test-RubyDanceState -StateName $NewState)) {
+        $script:assistantState = $NewState
+    }
     $script:frameIndex = 0
     Set-RubySize -NewHeight $script:currentHeight
     Set-RubyFrame
@@ -505,13 +598,13 @@ function Get-RubyDefaultRotationStates {
 
     $selected = New-Object System.Collections.Generic.List[string]
     foreach ($name in $preferred) {
-        if ($states.Contains($name) -and -not (Test-RubyUpdateOnlyState -StateName $name)) {
+        if ($states.Contains($name) -and -not (Test-RubyUpdateOnlyState -StateName $name) -and -not (Test-RubyDanceState -StateName $name)) {
             $selected.Add($name)
         }
     }
 
     foreach ($name in $states.Keys) {
-        if ($script:frameSources[$name].Kind -eq "frames" -and -not $selected.Contains($name) -and -not (Test-RubyUpdateOnlyState -StateName $name)) {
+        if ($script:frameSources[$name].Kind -eq "frames" -and -not $selected.Contains($name) -and -not (Test-RubyUpdateOnlyState -StateName $name) -and -not (Test-RubyDanceState -StateName $name)) {
             $selected.Add($name)
         }
     }
@@ -531,6 +624,15 @@ function Format-RubyRotationInterval {
 function Format-RubyFrameInterval {
     $seconds = $script:frameIntervalMs / 1000.0
     if (($script:frameIntervalMs % 1000) -eq 0) {
+        return "$([int]$seconds) seconds"
+    }
+
+    return ("{0:0.###} seconds" -f $seconds)
+}
+
+function Format-RubyDanceFrameInterval {
+    $seconds = $script:danceFrameIntervalMs / 1000.0
+    if (($script:danceFrameIntervalMs % 1000) -eq 0) {
         return "$([int]$seconds) seconds"
     }
 
@@ -573,9 +675,9 @@ function New-RubyDesktopShortcut {
         [string]$TargetPath = ""
     )
 
-    $launcher = Join-Path $PSScriptRoot "Run-RubyOverlay.cmd"
-    if (-not (Test-Path -LiteralPath $launcher)) {
-        throw "Launcher not found: $launcher"
+    $scriptPath = Join-Path $PSScriptRoot "Start-RubyOverlay.ps1"
+    if (-not (Test-Path -LiteralPath $scriptPath)) {
+        throw "Overlay script not found: $scriptPath"
     }
 
     if ([string]::IsNullOrWhiteSpace($TargetPath)) {
@@ -599,30 +701,35 @@ function New-RubyDesktopShortcut {
         }
     }
 
-    $arguments = "-Height $ShortcutHeight -State `"$ShortcutState`""
+    $overlayArguments = "-Height $ShortcutHeight -State `"$ShortcutState`""
     if ($ShortcutRotate) {
-        $arguments += " -Rotate"
+        $overlayArguments += " -Rotate"
     }
+    $powershellArguments = "-NoProfile -STA -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$scriptPath`" $overlayArguments"
+    $commandContent = "@echo off`r`nstart `"`" powershell.exe $powershellArguments`r`n"
 
     if ([System.IO.Path]::GetExtension($TargetPath).Equals(".cmd", [System.StringComparison]::OrdinalIgnoreCase)) {
-        $content = "@echo off`r`ncall `"$launcher`" $arguments`r`n"
-        [System.IO.File]::WriteAllText($TargetPath, $content, [System.Text.UTF8Encoding]::new($false))
+        [System.IO.File]::WriteAllText($TargetPath, $commandContent, [System.Text.UTF8Encoding]::new($false))
         return $TargetPath
     }
 
     try {
         $shell = New-Object -ComObject WScript.Shell
         $shortcut = $shell.CreateShortcut($TargetPath)
-        $shortcut.TargetPath = $launcher
-        $shortcut.Arguments = $arguments
+        $shortcut.TargetPath = "powershell.exe"
+        $shortcut.Arguments = $powershellArguments
         $shortcut.WorkingDirectory = $PSScriptRoot
         $shortcut.Description = "Launch Ruby Overlay"
+        $shortcut.WindowStyle = 7
+        $iconPath = Get-RubyShortcutIconPath
+        if (-not [string]::IsNullOrWhiteSpace($iconPath)) {
+            $shortcut.IconLocation = "$iconPath,0"
+        }
         $shortcut.Save()
         return $TargetPath
     } catch {
         $fallbackPath = [System.IO.Path]::ChangeExtension($TargetPath, ".cmd")
-        $content = "@echo off`r`ncall `"$launcher`" $arguments`r`n"
-        [System.IO.File]::WriteAllText($fallbackPath, $content, [System.Text.UTF8Encoding]::new($false))
+        [System.IO.File]::WriteAllText($fallbackPath, $commandContent, [System.Text.UTF8Encoding]::new($false))
         return $fallbackPath
     }
 }
@@ -644,10 +751,102 @@ function Invoke-RubyCreateShortcut {
     }
 }
 
+function Update-RubyModeMenu {
+    foreach ($key in $script:modeItems.Keys) {
+        $script:modeItems[$key].IsChecked = ([string]$key -eq $script:mode)
+    }
+
+    foreach ($key in $script:danceStateItems.Keys) {
+        $script:danceStateItems[$key].IsChecked = ([string]$key -eq $script:danceState)
+    }
+
+    foreach ($key in $script:danceIntervalItems.Keys) {
+        $script:danceIntervalItems[$key].IsChecked = ([int]$key -eq $script:danceFrameIntervalMs)
+    }
+
+    if ($null -ne $script:danceCurrentItem) {
+        $script:danceCurrentItem.Header = "Current: $(Format-RubyDanceFrameInterval)"
+    }
+}
+
+function Set-RubyDanceFrameInterval {
+    param(
+        [int]$IntervalMs,
+        [switch]$Save
+    )
+
+    $script:danceFrameIntervalMs = [Math]::Max(250, [Math]::Min(60000, $IntervalMs))
+    Update-RubyModeMenu
+    if ($script:mode -eq "dance" -and $null -ne $script:timer) {
+        $script:timer.Interval = [TimeSpan]::FromMilliseconds((Get-RubyFrameDelayMs -FrameState $script:currentState -FrameIndex $script:frameIndex))
+    }
+    if ($Save) {
+        Save-RubyRotationConfig
+    }
+}
+
+function Set-RubyMode {
+    param(
+        [string]$NewMode,
+        [string]$NewDanceState = "",
+        [switch]$Save
+    )
+
+    $normalizedMode = Get-RubyNormalizedMode -Value $NewMode
+    if ($normalizedMode -eq "dance") {
+        $targetDanceState = $NewDanceState
+        if ([string]::IsNullOrWhiteSpace($targetDanceState)) {
+            $targetDanceState = Get-RubyDefaultDanceState
+        }
+        if ([string]::IsNullOrWhiteSpace($targetDanceState) -or -not $states.Contains($targetDanceState) -or -not (Test-RubyDanceState -StateName $targetDanceState)) {
+            Update-RubyModeMenu
+            return
+        }
+
+        if ($script:mode -ne "dance") {
+            if (-not (Test-RubyDanceState -StateName $script:currentState)) {
+                $script:assistantState = $script:currentState
+            }
+            $script:assistantRotationEnabled = [bool]$script:rotationEnabled
+        }
+
+        $script:mode = "dance"
+        $script:danceState = $targetDanceState
+        Set-RubyRotationEnabled -Enabled $false
+        Set-RubyState -NewState $targetDanceState
+    } else {
+        $script:mode = "assistant"
+        if ($states.Contains($script:assistantState) -and (Test-RubyDanceState -StateName $script:currentState)) {
+            Set-RubyState -NewState $script:assistantState
+        }
+        Set-RubyRotationEnabled -Enabled $script:assistantRotationEnabled
+    }
+
+    Update-RubyModeMenu
+    Set-RubyRotationTimerState
+    if ($Save) {
+        Save-RubyRotationConfig
+    }
+}
+
+function Select-RubyState {
+    param([string]$StateName)
+
+    if (Test-RubyDanceState -StateName $StateName) {
+        Set-RubyMode -NewMode "dance" -NewDanceState $StateName -Save
+        return
+    }
+
+    Set-RubyMode -NewMode "assistant"
+    Set-RubyState -NewState $StateName
+}
+
 function Update-RubyRotationMenu {
+    Update-RubyModeMenu
+
     if ($null -ne $script:rotateItem) {
         $script:rotateItem.IsChecked = [bool]$script:rotationEnabled
-        $script:rotateItem.IsEnabled = $script:rotationStates.Count -gt 0
+        $script:rotateItem.IsEnabled = ($script:mode -eq "assistant" -and $script:rotationStates.Count -gt 0)
     }
 
     if ($null -ne $script:rotationCurrentItem) {
@@ -846,10 +1045,14 @@ function Show-RubyFrameIntervalDialog {
 }
 
 function Save-RubyRotationConfig {
+    $enabledForConfig = if ($script:mode -eq "dance") { [bool]$script:assistantRotationEnabled } else { [bool]$script:rotationEnabled }
     $config = [ordered]@{
-        enabled = [bool]$script:rotationEnabled
+        enabled = $enabledForConfig
         intervalMs = [int]$script:rotationCycleIntervalMs
         frameIntervalMs = [int]$script:frameIntervalMs
+        mode = [string]$script:mode
+        danceState = [string]$script:danceState
+        danceFrameIntervalMs = [int]$script:danceFrameIntervalMs
         states = @(Remove-RubyUpdateOnlyStates -StateNames (Get-RubyRotationStateArray))
     }
 
@@ -868,7 +1071,7 @@ function Set-RubyRotationTimerState {
     }
 
     $script:rotationTimer.Interval = [TimeSpan]::FromMilliseconds($script:rotationCycleIntervalMs)
-    if ($script:rotationEnabled -and $script:rotationStates.Count -gt 0) {
+    if ($script:mode -eq "assistant" -and $script:rotationEnabled -and $script:rotationStates.Count -gt 0) {
         $script:rotationTimer.Start()
     } else {
         $script:rotationTimer.Stop()
@@ -883,7 +1086,7 @@ function Set-RubyRotationStates {
 
     $selected = New-Object System.Collections.Generic.List[string]
     foreach ($name in @(ConvertTo-RubyStateNames -Value $StateNames)) {
-        if ($states.Contains($name) -and -not $selected.Contains($name)) {
+        if ($states.Contains($name) -and -not (Test-RubyDanceState -StateName $name) -and -not $selected.Contains($name)) {
             $selected.Add($name)
         }
     }
@@ -907,6 +1110,9 @@ function Set-RubyRotationEnabled {
     )
 
     $script:rotationEnabled = [bool]($Enabled -and $script:rotationStates.Count -gt 0)
+    if ($script:mode -eq "assistant") {
+        $script:assistantRotationEnabled = [bool]$script:rotationEnabled
+    }
     Write-RubyRotationLog -Message "enabled=$script:rotationEnabled states=$($script:rotationStates.Count) intervalMs=$script:rotationCycleIntervalMs frameIntervalMs=$script:frameIntervalMs current=$script:currentState"
     Update-RubyRotationMenu
     Set-RubyRotationTimerState
@@ -953,7 +1159,7 @@ function Set-RubyRotationStateIncluded {
         [bool]$Included
     )
 
-    if (Test-RubyUpdateOnlyState -StateName $StateName) {
+    if ((Test-RubyUpdateOnlyState -StateName $StateName) -or (Test-RubyDanceState -StateName $StateName)) {
         return
     }
 
@@ -991,7 +1197,7 @@ function Set-RubyRotationGroupIncluded {
 
     if ($Included) {
         foreach ($name in $groupStates) {
-            if ($states.Contains($name) -and -not (Test-RubyUpdateOnlyState -StateName $name) -and -not $nextStates.Contains($name)) {
+            if ($states.Contains($name) -and -not (Test-RubyUpdateOnlyState -StateName $name) -and -not (Test-RubyDanceState -StateName $name) -and -not $nextStates.Contains($name)) {
                 $nextStates.Add($name)
             }
         }
@@ -1004,6 +1210,9 @@ function Load-RubyRotationConfig {
     $enabled = $false
     $interval = $script:rotationCycleIntervalMs
     $frameInterval = $script:frameIntervalMs
+    $modeName = $script:mode
+    $danceStateName = $script:danceState
+    $danceFrameInterval = $script:danceFrameIntervalMs
     $stateNames = @(Get-RubyDefaultRotationStates)
 
     if (Test-Path -LiteralPath $RotationConfigPath) {
@@ -1012,6 +1221,9 @@ function Load-RubyRotationConfig {
             $enabledProperty = $config.PSObject.Properties["enabled"]
             $intervalProperty = $config.PSObject.Properties["intervalMs"]
             $frameIntervalProperty = $config.PSObject.Properties["frameIntervalMs"]
+            $modeProperty = $config.PSObject.Properties["mode"]
+            $danceStateProperty = $config.PSObject.Properties["danceState"]
+            $danceFrameIntervalProperty = $config.PSObject.Properties["danceFrameIntervalMs"]
             $statesProperty = $config.PSObject.Properties["states"]
 
             if ($null -ne $enabledProperty) {
@@ -1023,6 +1235,15 @@ function Load-RubyRotationConfig {
             if ($null -ne $frameIntervalProperty) {
                 $frameInterval = [int]$frameIntervalProperty.Value
             }
+            if ($null -ne $modeProperty) {
+                $modeName = [string]$modeProperty.Value
+            }
+            if ($null -ne $danceStateProperty) {
+                $danceStateName = [string]$danceStateProperty.Value
+            }
+            if ($null -ne $danceFrameIntervalProperty) {
+                $danceFrameInterval = [int]$danceFrameIntervalProperty.Value
+            }
             if ($null -ne $statesProperty) {
                 $stateNames = @(ConvertTo-RubyStateNames -Value $statesProperty.Value)
             }
@@ -1030,14 +1251,22 @@ function Load-RubyRotationConfig {
         } catch {
             $enabled = $false
             $frameInterval = $script:frameIntervalMs
+            $modeName = "assistant"
+            $danceStateName = $script:danceState
+            $danceFrameInterval = $script:danceFrameIntervalMs
             $stateNames = @(Get-RubyDefaultRotationStates)
         }
     }
 
     Set-RubyRotationInterval -IntervalMs $interval
     Set-RubyFrameInterval -IntervalMs $frameInterval
+    Set-RubyDanceFrameInterval -IntervalMs $danceFrameInterval
+    if (-not [string]::IsNullOrWhiteSpace($danceStateName) -and $states.Contains($danceStateName)) {
+        $script:danceState = $danceStateName
+    }
     Set-RubyRotationStates -StateNames (Remove-RubyUpdateOnlyStates -StateNames $stateNames)
     Set-RubyRotationEnabled -Enabled $enabled
+    Set-RubyMode -NewMode $modeName -NewDanceState $script:danceState
 }
 
 function Apply-RubyRotationConfig {
@@ -1054,6 +1283,11 @@ function Apply-RubyRotationConfig {
 }
 
 function Invoke-RubyRotation {
+    if ($script:mode -ne "assistant") {
+        Write-RubyRotationLog -Message "tick skipped mode=$script:mode"
+        return
+    }
+
     if (-not $script:rotationEnabled -or $script:rotationStates.Count -eq 0) {
         Write-RubyRotationLog -Message "tick skipped enabled=$script:rotationEnabled states=$($script:rotationStates.Count)"
         return
@@ -1094,10 +1328,6 @@ function Apply-RubyControl {
         return
     }
 
-    if ($control.PSObject.Properties.Name -contains "state") {
-        Set-RubyState -NewState ([string]$control.state)
-    }
-
     if ($control.PSObject.Properties.Name -contains "height") {
         Set-RubySize -NewHeight ([int]$control.height)
     }
@@ -1127,6 +1357,35 @@ function Apply-RubyControl {
 
     if ($control.PSObject.Properties.Name -contains "frameIntervalMs") {
         Set-RubyFrameInterval -IntervalMs ([int]$control.frameIntervalMs)
+    }
+
+    if ($control.PSObject.Properties.Name -contains "danceFrameIntervalMs") {
+        Set-RubyDanceFrameInterval -IntervalMs ([int]$control.danceFrameIntervalMs)
+    }
+
+    $requestedMode = $null
+    if ($control.PSObject.Properties.Name -contains "mode") {
+        $requestedMode = [string]$control.mode
+    }
+
+    $requestedDanceState = ""
+    if ($control.PSObject.Properties.Name -contains "danceState") {
+        $candidateDanceState = [string]$control.danceState
+        if ($states.Contains($candidateDanceState) -and (Test-RubyDanceState -StateName $candidateDanceState)) {
+            $requestedDanceState = $candidateDanceState
+            $script:danceState = $candidateDanceState
+        }
+    }
+
+    if ($null -ne $requestedMode) {
+        Set-RubyMode -NewMode $requestedMode -NewDanceState $requestedDanceState
+    }
+
+    if ($control.PSObject.Properties.Name -contains "state") {
+        $requestedState = [string]$control.state
+        if (-not ($null -ne $requestedMode -and (Get-RubyNormalizedMode -Value $requestedMode) -eq "dance")) {
+            Set-RubyState -NewState $requestedState
+        }
     }
 
     if ($control.PSObject.Properties.Name -contains "rotate") {
@@ -1525,11 +1784,20 @@ if ($PSBoundParameters.ContainsKey("RotationIntervalMs") -and $RotationIntervalM
 if ($PSBoundParameters.ContainsKey("FrameIntervalMs") -and $FrameIntervalMs -gt 0) {
     Set-RubyFrameInterval -IntervalMs $FrameIntervalMs
 }
+if ($PSBoundParameters.ContainsKey("DanceFrameIntervalMs") -and $DanceFrameIntervalMs -gt 0) {
+    Set-RubyDanceFrameInterval -IntervalMs $DanceFrameIntervalMs
+}
+if ($PSBoundParameters.ContainsKey("DanceState") -and -not [string]::IsNullOrWhiteSpace($DanceState) -and $states.Contains($DanceState) -and (Test-RubyDanceState -StateName $DanceState)) {
+    $script:danceState = $DanceState
+}
 if ($PSBoundParameters.ContainsKey("RotateStates") -and -not [string]::IsNullOrWhiteSpace($RotateStates)) {
     Set-RubyRotationStates -StateNames $RotateStates
 }
 if ($Rotate) {
     Set-RubyRotationEnabled -Enabled $true
+}
+if ($PSBoundParameters.ContainsKey("Mode")) {
+    Set-RubyMode -NewMode $Mode -NewDanceState $script:danceState
 }
 
 Set-RubySize -NewHeight $script:currentHeight
@@ -1561,11 +1829,66 @@ foreach ($groupName in $stateGroups.Keys) {
         $item = New-Object System.Windows.Controls.MenuItem
         $item.Header = $name
         $stateName = $name
-        $item.Add_Click({ Set-RubyState -NewState $stateName }.GetNewClosure())
+        $item.Add_Click({ Select-RubyState -StateName $stateName }.GetNewClosure())
         [void]$groupMenu.Items.Add($item)
     }
     [void]$contextMenu.Items.Add($groupMenu)
 }
+
+[void]$contextMenu.Items.Add((New-Object System.Windows.Controls.Separator))
+
+$modeMenu = New-Object System.Windows.Controls.MenuItem
+$modeMenu.Header = "Mode"
+
+$assistantModeItem = New-Object System.Windows.Controls.MenuItem
+$assistantModeItem.Header = "Assistant mode"
+$assistantModeItem.IsCheckable = $true
+$script:modeItems["assistant"] = $assistantModeItem
+$assistantModeItem.Add_Click({ Set-RubyMode -NewMode "assistant" -Save })
+[void]$modeMenu.Items.Add($assistantModeItem)
+
+$danceModeItem = New-Object System.Windows.Controls.MenuItem
+$danceModeItem.Header = "Dance mode"
+$danceModeItem.IsCheckable = $true
+$danceModeItem.IsEnabled = @(Get-RubyDanceStateNames).Count -gt 0
+$script:modeItems["dance"] = $danceModeItem
+$danceModeItem.Add_Click({ Set-RubyMode -NewMode "dance" -NewDanceState $script:danceState -Save })
+[void]$modeMenu.Items.Add($danceModeItem)
+[void]$contextMenu.Items.Add($modeMenu)
+
+$danceStates = @(Get-RubyDanceStateNames)
+if ($danceStates.Count -gt 0) {
+    $danceStateMenu = New-Object System.Windows.Controls.MenuItem
+    $danceStateMenu.Header = "Dance set"
+    foreach ($name in $danceStates) {
+        $item = New-Object System.Windows.Controls.MenuItem
+        $item.Header = $name
+        $item.IsCheckable = $true
+        $danceStateName = $name
+        $script:danceStateItems[$danceStateName] = $item
+        $item.Add_Click({ Set-RubyMode -NewMode "dance" -NewDanceState $danceStateName -Save }.GetNewClosure())
+        [void]$danceStateMenu.Items.Add($item)
+    }
+    [void]$contextMenu.Items.Add($danceStateMenu)
+}
+
+$danceSpeedMenu = New-Object System.Windows.Controls.MenuItem
+$danceSpeedMenu.Header = "Dance speed"
+$script:danceCurrentItem = New-Object System.Windows.Controls.MenuItem
+$script:danceCurrentItem.Header = "Current: $(Format-RubyDanceFrameInterval)"
+$script:danceCurrentItem.IsEnabled = $false
+[void]$danceSpeedMenu.Items.Add($script:danceCurrentItem)
+[void]$danceSpeedMenu.Items.Add((New-Object System.Windows.Controls.Separator))
+foreach ($interval in @(750, 900, 1000, 1250)) {
+    $item = New-Object System.Windows.Controls.MenuItem
+    $item.Header = "$([double]($interval / 1000.0)) seconds"
+    $item.IsCheckable = $true
+    $targetInterval = $interval
+    $script:danceIntervalItems[$targetInterval] = $item
+    $item.Add_Click({ Set-RubyDanceFrameInterval -IntervalMs $targetInterval -Save }.GetNewClosure())
+    [void]$danceSpeedMenu.Items.Add($item)
+}
+[void]$contextMenu.Items.Add($danceSpeedMenu)
 
 [void]$contextMenu.Items.Add((New-Object System.Windows.Controls.Separator))
 
@@ -1759,7 +2082,7 @@ $window.Add_KeyDown({
     }
 
     if ($null -ne $shortcutIndex -and $shortcutIndex -lt $script:stateShortcutNames.Count) {
-        Set-RubyState $script:stateShortcutNames[$shortcutIndex]
+        Select-RubyState -StateName $script:stateShortcutNames[$shortcutIndex]
     }
 })
 

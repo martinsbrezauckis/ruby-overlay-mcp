@@ -27,6 +27,10 @@ struct Arguments {
     var updateApiBaseUrl = "https://api.github.com"
     var disableUpdateCheck = false
     var rotate = false
+    var mode = "assistant"
+    var modeProvided = false
+    var danceState = ""
+    var danceFrameIntervalMs = 900
     var rotateStates = ""
     var rotationIntervalMs = 0
     var frameIntervalMs = 0
@@ -70,6 +74,15 @@ struct Arguments {
                 disableUpdateCheck = true
             case "--rotate":
                 rotate = true
+            case "--mode":
+                if let next = value() {
+                    mode = next
+                    modeProvided = true
+                }
+            case "--dance-state":
+                if let next = value() { danceState = next }
+            case "--dance-frame-interval-ms":
+                if let next = value(), let parsed = Int(next) { danceFrameIntervalMs = parsed }
             case "--rotate-states":
                 if let next = value() { rotateStates = next }
             case "--rotation-interval-ms":
@@ -159,6 +172,11 @@ final class RubyOverlayController: NSObject, NSApplicationDelegate {
     private var rotationStates: [String] = []
     private var rotationIntervalMs = 9000
     private var frameIntervalMs = 9000
+    private var mode = "assistant"
+    private var assistantState = "idle"
+    private var assistantRotationEnabled = false
+    private var danceState = ""
+    private var danceFrameIntervalMs = 900
     private var delayMultiplier: Double
 
     private var assetsRoot: URL {
@@ -179,7 +197,7 @@ final class RubyOverlayController: NSObject, NSApplicationDelegate {
     }
 
     private var visibleRotationStateOrder: [String] {
-        visibleStateOrder.filter { !isUpdateOnlyState($0) }
+        visibleStateOrder.filter { !isUpdateOnlyState($0) && !isDanceState($0) }
     }
 
     private var controlPath: URL {
@@ -203,14 +221,20 @@ final class RubyOverlayController: NSObject, NSApplicationDelegate {
         self.currentState = arguments.state
         self.currentHeight = max(120, arguments.height)
         self.delayMultiplier = min(10.0, max(0.25, arguments.animationDelayMultiplier))
+        self.assistantState = arguments.state
+        self.danceFrameIntervalMs = min(60000, max(250, arguments.danceFrameIntervalMs))
         super.init()
         loadFrameSources()
+        self.danceState = frameSources.keys.contains(arguments.danceState) && isDanceState(arguments.danceState) ? arguments.danceState : defaultDanceState()
         loadRotationConfig()
         if arguments.rotationIntervalMs > 0 {
             setRotationInterval(arguments.rotationIntervalMs, save: false)
         }
         if arguments.frameIntervalMs > 0 {
             setFrameInterval(arguments.frameIntervalMs, save: false)
+        }
+        if arguments.danceFrameIntervalMs > 0 {
+            setDanceFrameInterval(arguments.danceFrameIntervalMs, save: false)
         }
         if !arguments.rotateStates.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             setRotationStates(parseStateList(arguments.rotateStates), save: false)
@@ -220,6 +244,9 @@ final class RubyOverlayController: NSObject, NSApplicationDelegate {
         }
         if !frameSources.keys.contains(currentState) {
             currentState = stateOrder.first ?? "idle"
+        }
+        if arguments.modeProvided {
+            setMode(arguments.mode, danceState: danceState, save: false)
         }
     }
 
@@ -399,6 +426,10 @@ final class RubyOverlayController: NSObject, NSApplicationDelegate {
     }
 
     private func frameDuration(for state: String, index: Int) -> TimeInterval {
+        if mode == "dance" && isDanceState(state) {
+            return Double(danceFrameIntervalMs) / 1000.0
+        }
+
         if frameSources[state]?.kind == "frames" {
             return Double(frameIntervalMs) / 1000.0
         }
@@ -411,6 +442,9 @@ final class RubyOverlayController: NSObject, NSApplicationDelegate {
     private func setState(_ state: String) {
         guard frameSources[state] != nil else { return }
         currentState = state
+        if mode == "assistant" && !isDanceState(state) {
+            assistantState = state
+        }
         frameIndex = 0
         setHeight(currentHeight)
         setFrame()
@@ -477,9 +511,6 @@ final class RubyOverlayController: NSObject, NSApplicationDelegate {
             return
         }
 
-        if let state = control["state"] as? String {
-            setState(state)
-        }
         if let height = intValue(control["height"]) {
             setHeight(height)
         }
@@ -502,6 +533,21 @@ final class RubyOverlayController: NSObject, NSApplicationDelegate {
         if let interval = intValue(control["frameIntervalMs"]) {
             setFrameInterval(interval, save: false)
         }
+        if let interval = intValue(control["danceFrameIntervalMs"]) {
+            setDanceFrameInterval(interval, save: false)
+        }
+        let requestedMode = control["mode"] as? String
+        let requestedDanceState = control["danceState"] as? String
+        if let requestedDanceState, frameSources.keys.contains(requestedDanceState), isDanceState(requestedDanceState) {
+            danceState = requestedDanceState
+        }
+        if let requestedMode {
+            setMode(requestedMode, danceState: requestedDanceState ?? danceState, save: false)
+        }
+        if let state = control["state"] as? String,
+           normalizeMode(requestedMode ?? "") != "dance" {
+            setState(state)
+        }
         if let rotate = boolValue(control["rotate"]) ?? boolValue(control["rotationEnabled"]) {
             setRotationEnabled(rotate, save: false)
         }
@@ -519,12 +565,18 @@ final class RubyOverlayController: NSObject, NSApplicationDelegate {
         var enabled = false
         var interval = rotationIntervalMs
         var frameInterval = frameIntervalMs
+        var modeName = mode
+        var danceStateName = danceState
+        var danceInterval = danceFrameIntervalMs
         var states = defaultRotationStates()
 
         if let config = readObject(rotationConfigPath) {
             enabled = boolValue(config["enabled"]) ?? enabled
             interval = intValue(config["intervalMs"]) ?? interval
             frameInterval = intValue(config["frameIntervalMs"]) ?? frameInterval
+            modeName = (config["mode"] as? String) ?? modeName
+            danceStateName = (config["danceState"] as? String) ?? danceStateName
+            danceInterval = intValue(config["danceFrameIntervalMs"]) ?? danceInterval
             if let rawStates = config["states"] {
                 states = stateArray(rawStates)
             }
@@ -533,8 +585,13 @@ final class RubyOverlayController: NSObject, NSApplicationDelegate {
 
         setRotationInterval(interval, save: false)
         setFrameInterval(frameInterval, save: false)
+        setDanceFrameInterval(danceInterval, save: false)
+        if frameSources.keys.contains(danceStateName), isDanceState(danceStateName) {
+            danceState = danceStateName
+        }
         setRotationStates(removeUpdateOnlyStates(states), save: false)
         setRotationEnabled(enabled, save: false)
+        setMode(modeName, danceState: danceState, save: false)
     }
 
     private func defaultRotationStates() -> [String] {
@@ -562,11 +619,31 @@ final class RubyOverlayController: NSObject, NSApplicationDelegate {
             "playfull",
             "personal attention"
         ]
-        var result = preferred.filter { frameSources.keys.contains($0) && !isUpdateOnlyState($0) }
-        for state in stateOrder where frameSources[state]?.kind == "frames" && !result.contains(state) && !isUpdateOnlyState(state) {
+        var result = preferred.filter { frameSources.keys.contains($0) && !isUpdateOnlyState($0) && !isDanceState($0) }
+        for state in stateOrder where frameSources[state]?.kind == "frames" && !result.contains(state) && !isUpdateOnlyState(state) && !isDanceState(state) {
             result.append(state)
         }
         return result
+    }
+
+    private func normalizeMode(_ value: String) -> String {
+        value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "dance" ? "dance" : "assistant"
+    }
+
+    private func isDanceState(_ state: String) -> Bool {
+        let normalized = state.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return normalized.hasPrefix("dance-") || normalized.hasPrefix("dance ")
+    }
+
+    private func danceStates() -> [String] {
+        stateOrder.filter { frameSources.keys.contains($0) && isDanceState($0) }
+    }
+
+    private func defaultDanceState() -> String {
+        if !danceState.isEmpty, frameSources.keys.contains(danceState) {
+            return danceState
+        }
+        return danceStates().first ?? ""
     }
 
     private func isUpdateOnlyState(_ state: String) -> Bool {
@@ -578,6 +655,10 @@ final class RubyOverlayController: NSObject, NSApplicationDelegate {
     }
 
     private func stateGroupName(_ state: String) -> String {
+        if isDanceState(state) {
+            return "Dance"
+        }
+
         let cosplayStates = Set([
             "angel",
             "belly dance",
@@ -594,7 +675,7 @@ final class RubyOverlayController: NSObject, NSApplicationDelegate {
     }
 
     private func groupedStates(_ states: [String]) -> [(String, [String])] {
-        let orderedGroups = ["Assistant", "Cosplay"]
+        let orderedGroups = ["Assistant", "Cosplay", "Dance"]
         var groups: [String: [String]] = [:]
         for state in states {
             groups[stateGroupName(state), default: []].append(state)
@@ -607,13 +688,16 @@ final class RubyOverlayController: NSObject, NSApplicationDelegate {
 
     private func setRotationEnabled(_ enabled: Bool, save: Bool) {
         rotationEnabled = enabled && !rotationStates.isEmpty
+        if mode == "assistant" {
+            assistantRotationEnabled = rotationEnabled
+        }
         scheduleRotationTimer()
         if save { saveRotationConfig() }
     }
 
     private func setRotationStates(_ states: [String], save: Bool) {
         var clean: [String] = []
-        for state in states where frameSources.keys.contains(state) && !clean.contains(state) {
+        for state in states where frameSources.keys.contains(state) && !isDanceState(state) && !clean.contains(state) {
             clean.append(state)
         }
         rotationStates = clean
@@ -638,15 +722,49 @@ final class RubyOverlayController: NSObject, NSApplicationDelegate {
         if save { saveRotationConfig() }
     }
 
+    private func setDanceFrameInterval(_ intervalMs: Int, save: Bool) {
+        danceFrameIntervalMs = min(60000, max(250, intervalMs))
+        if mode == "dance", imageView != nil {
+            scheduleFrameTimer()
+        }
+        if save { saveRotationConfig() }
+    }
+
+    private func setMode(_ requestedMode: String, danceState requestedDanceState: String = "", save: Bool) {
+        let nextMode = normalizeMode(requestedMode)
+        if nextMode == "dance" {
+            let targetDanceState = frameSources.keys.contains(requestedDanceState) && isDanceState(requestedDanceState) ? requestedDanceState : defaultDanceState()
+            guard !targetDanceState.isEmpty else { return }
+            if mode != "dance" {
+                if !isDanceState(currentState) {
+                    assistantState = currentState
+                }
+                assistantRotationEnabled = rotationEnabled
+            }
+            mode = "dance"
+            danceState = targetDanceState
+            setRotationEnabled(false, save: false)
+            setState(targetDanceState)
+        } else {
+            mode = "assistant"
+            if isDanceState(currentState), frameSources.keys.contains(assistantState) {
+                setState(assistantState)
+            }
+            setRotationEnabled(assistantRotationEnabled, save: false)
+        }
+        if save { saveRotationConfig() }
+    }
+
     private func scheduleRotationTimer() {
         rotationTimer?.invalidate()
-        guard rotationEnabled, !rotationStates.isEmpty else { return }
+        guard mode == "assistant", rotationEnabled, !rotationStates.isEmpty else { return }
         rotationTimer = Timer.scheduledTimer(withTimeInterval: Double(rotationIntervalMs) / 1000.0, repeats: true) { [weak self] _ in
             self?.advanceRotation()
         }
     }
 
     private func advanceRotation() {
+        guard mode == "assistant" else { return }
         guard !rotationStates.isEmpty else { return }
         let index = rotationStates.firstIndex(of: currentState)
         let nextIndex = index.map { ($0 + 1) % rotationStates.count } ?? 0
@@ -654,10 +772,14 @@ final class RubyOverlayController: NSObject, NSApplicationDelegate {
     }
 
     private func saveRotationConfig() {
+        let enabledForConfig = mode == "dance" ? assistantRotationEnabled : rotationEnabled
         let object: [String: Any] = [
-            "enabled": rotationEnabled,
+            "enabled": enabledForConfig,
             "intervalMs": rotationIntervalMs,
             "frameIntervalMs": frameIntervalMs,
+            "mode": mode,
+            "danceState": danceState,
+            "danceFrameIntervalMs": danceFrameIntervalMs,
             "states": removeUpdateOnlyStates(rotationStates)
         ]
         guard let data = try? JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys]) else {
@@ -929,10 +1051,61 @@ final class RubyOverlayController: NSObject, NSApplicationDelegate {
 
         menu.addItem(.separator())
 
+        let modeMenu = NSMenu()
+        let assistant = NSMenuItem(title: "Assistant mode", action: #selector(selectMode(_:)), keyEquivalent: "")
+        assistant.target = self
+        assistant.representedObject = "assistant"
+        assistant.state = mode == "assistant" ? .on : .off
+        modeMenu.addItem(assistant)
+
+        let dance = NSMenuItem(title: "Dance mode", action: #selector(selectMode(_:)), keyEquivalent: "")
+        dance.target = self
+        dance.representedObject = "dance"
+        dance.state = mode == "dance" ? .on : .off
+        dance.isEnabled = !danceStates().isEmpty
+        modeMenu.addItem(dance)
+
+        let modeItem = NSMenuItem(title: "Mode", action: nil, keyEquivalent: "")
+        modeItem.submenu = modeMenu
+        menu.addItem(modeItem)
+
+        let currentDanceStates = danceStates()
+        if !currentDanceStates.isEmpty {
+            let danceStateMenu = NSMenu()
+            for state in currentDanceStates {
+                let item = NSMenuItem(title: state, action: #selector(selectDanceState(_:)), keyEquivalent: "")
+                item.target = self
+                item.representedObject = state
+                item.state = state == danceState ? .on : .off
+                danceStateMenu.addItem(item)
+            }
+            let danceStateItem = NSMenuItem(title: "Dance set", action: nil, keyEquivalent: "")
+            danceStateItem.submenu = danceStateMenu
+            menu.addItem(danceStateItem)
+        }
+
+        let danceSpeedMenu = NSMenu()
+        let danceCurrent = NSMenuItem(title: "Current: \(formatDanceFrameInterval())", action: nil, keyEquivalent: "")
+        danceCurrent.isEnabled = false
+        danceSpeedMenu.addItem(danceCurrent)
+        danceSpeedMenu.addItem(.separator())
+        for interval in [750, 900, 1000, 1250] {
+            let item = NSMenuItem(title: "\(Double(interval) / 1000.0) seconds", action: #selector(selectDanceFrameInterval(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = interval
+            item.state = interval == danceFrameIntervalMs ? .on : .off
+            danceSpeedMenu.addItem(item)
+        }
+        let danceSpeedItem = NSMenuItem(title: "Dance speed", action: nil, keyEquivalent: "")
+        danceSpeedItem.submenu = danceSpeedMenu
+        menu.addItem(danceSpeedItem)
+
+        menu.addItem(.separator())
+
         let rotateItem = NSMenuItem(title: "Auto rotate", action: #selector(toggleRotate(_:)), keyEquivalent: "")
         rotateItem.target = self
         rotateItem.state = rotationEnabled ? .on : .off
-        rotateItem.isEnabled = !rotationStates.isEmpty
+        rotateItem.isEnabled = mode == "assistant" && !rotationStates.isEmpty
         menu.addItem(rotateItem)
 
         let rotationStatesMenu = NSMenu()
@@ -1032,7 +1205,27 @@ final class RubyOverlayController: NSObject, NSApplicationDelegate {
 
     @objc private func selectState(_ sender: NSMenuItem) {
         guard let state = sender.representedObject as? String else { return }
+        if isDanceState(state) {
+            setMode("dance", danceState: state, save: true)
+            return
+        }
+        setMode("assistant", save: false)
         setState(state)
+    }
+
+    @objc private func selectMode(_ sender: NSMenuItem) {
+        guard let requestedMode = sender.representedObject as? String else { return }
+        setMode(requestedMode, danceState: danceState, save: true)
+    }
+
+    @objc private func selectDanceState(_ sender: NSMenuItem) {
+        guard let state = sender.representedObject as? String else { return }
+        setMode("dance", danceState: state, save: true)
+    }
+
+    @objc private func selectDanceFrameInterval(_ sender: NSMenuItem) {
+        guard let interval = sender.representedObject as? Int else { return }
+        setDanceFrameInterval(interval, save: true)
     }
 
     @objc private func toggleRotate(_ sender: NSMenuItem) {
@@ -1041,7 +1234,7 @@ final class RubyOverlayController: NSObject, NSApplicationDelegate {
 
     @objc private func toggleRotationState(_ sender: NSMenuItem) {
         guard let state = sender.representedObject as? String else { return }
-        guard !isUpdateOnlyState(state) else { return }
+        guard !isUpdateOnlyState(state) && !isDanceState(state) else { return }
         var next = rotationStates.filter { $0 != state }
         if !rotationStates.contains(state) {
             next.append(state)
@@ -1051,7 +1244,7 @@ final class RubyOverlayController: NSObject, NSApplicationDelegate {
 
     @objc private func toggleRotationGroup(_ sender: NSMenuItem) {
         guard let states = sender.representedObject as? [String] else { return }
-        let cleanStates = removeUpdateOnlyStates(states)
+        let cleanStates = removeUpdateOnlyStates(states).filter { !isDanceState($0) }
         let allSelected = cleanStates.allSatisfy { rotationStates.contains($0) }
         var next = rotationStates.filter { !cleanStates.contains($0) }
         if !allSelected {
@@ -1141,6 +1334,9 @@ final class RubyOverlayController: NSObject, NSApplicationDelegate {
         try fileManager.createDirectory(at: desktop, withIntermediateDirectories: true)
         let shortcutPath = desktop.appendingPathComponent("Ruby Overlay.command")
         var arguments = "--height \(currentHeight) --state \(shellQuote(currentState))"
+        if mode == "dance" {
+            arguments += " --mode dance --dance-state \(shellQuote(danceState)) --dance-frame-interval-ms \(danceFrameIntervalMs)"
+        }
         if rotationEnabled {
             arguments += " --rotate"
         }
@@ -1151,7 +1347,7 @@ final class RubyOverlayController: NSObject, NSApplicationDelegate {
         #!/bin/zsh
         set -e
         cd \(shellQuote(args.projectRoot.path))
-        exec \(shellQuote(launcher.path)) \(arguments)
+        nohup \(shellQuote(launcher.path)) \(arguments) >/dev/null 2>&1 &
 
         """
         try content.write(to: shortcutPath, atomically: true, encoding: .utf8)
@@ -1179,7 +1375,13 @@ final class RubyOverlayController: NSObject, NSApplicationDelegate {
         case "1"..."9":
             let visible = visibleStateOrder
             if let value = Int(key), value - 1 < visible.count {
-                setState(visible[value - 1])
+                let state = visible[value - 1]
+                if isDanceState(state) {
+                    setMode("dance", danceState: state, save: false)
+                } else {
+                    setMode("assistant", save: false)
+                    setState(state)
+                }
             }
         default:
             break
@@ -1207,6 +1409,13 @@ final class RubyOverlayController: NSObject, NSApplicationDelegate {
             return "\(frameIntervalMs / 1000) seconds"
         }
         return String(format: "%.3g seconds", Double(frameIntervalMs) / 1000.0)
+    }
+
+    private func formatDanceFrameInterval() -> String {
+        if danceFrameIntervalMs % 1000 == 0 {
+            return "\(danceFrameIntervalMs / 1000) seconds"
+        }
+        return String(format: "%.3g seconds", Double(danceFrameIntervalMs) / 1000.0)
     }
 
     private func parseStateList(_ raw: String) -> [String] {

@@ -1,6 +1,7 @@
 __pycache__/
 *.pyc
 .test-tmp/
+output/
 
 macos/.build/
 .DS_Store

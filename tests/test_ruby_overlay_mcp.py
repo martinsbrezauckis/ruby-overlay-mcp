@@ -1,4 +1,9 @@
 import importlib.util
+import json
+import os
+import shutil
+import subprocess
+import tempfile
 import unittest
 import urllib.error
 from pathlib import Path
@@ -146,6 +151,66 @@ class RubyOverlayMcpTests(unittest.TestCase):
         self.assertIn("ruby", tool_names)
         self.assertIn("ruby_overlay_check_update", tool_names)
         self.assertIn("ruby_overlay_create_shortcut", tool_names)
+        self.assertIn("ruby_overlay_set_mode", tool_names)
+
+    def test_mcp_windows_shortcut_uses_detached_hidden_powershell(self):
+        module = load_module()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            launcher = root / "Run-RubyOverlay.cmd"
+            launcher.write_text("@echo off\r\n", encoding="utf-8")
+            icon_dir = root / "assets"
+            icon_dir.mkdir()
+            shutil.copy2(MODULE_PATH.parents[1] / "assets" / "ruby-icon.ico", icon_dir / "ruby-icon.ico")
+            for path in [Path.home() / "Desktop" / "Ruby Test.cmd", Path.home() / "Desktop" / "Ruby Test.lnk"]:
+                if path.exists():
+                    path.unlink()
+
+            previous_os_name = module.os.name
+            try:
+                module.os.name = "nt"
+                shortcut = module.create_desktop_shortcut(root, launcher, "Ruby Test", "samba", 640, True)
+            finally:
+                module.os.name = previous_os_name
+
+            if os.name == "nt" and shutil.which("powershell.exe") and shortcut.suffix.lower() == ".lnk":
+                result = subprocess.run(
+                    [
+                        "powershell.exe",
+                        "-NoProfile",
+                        "-ExecutionPolicy",
+                        "Bypass",
+                        "-Command",
+                        (
+                            "$shortcut=(New-Object -ComObject WScript.Shell)."
+                            f"CreateShortcut('{shortcut}');"
+                            "Write-Output $shortcut.TargetPath;"
+                            "Write-Output $shortcut.Arguments;"
+                            "Write-Output $shortcut.IconLocation"
+                        ),
+                    ],
+                    text=True,
+                    capture_output=True,
+                    timeout=20,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("powershell.exe", result.stdout)
+                self.assertIn("-WindowStyle Hidden", result.stdout)
+                self.assertIn("Start-RubyOverlay.ps1", result.stdout)
+                self.assertIn('-State "samba"', result.stdout)
+                self.assertIn("-Height 640", result.stdout)
+                self.assertIn("-Rotate", result.stdout)
+                self.assertIn("ruby-icon.ico", result.stdout)
+            else:
+                content = shortcut.read_text(encoding="utf-8")
+                self.assertIn('start "" powershell.exe', content)
+                self.assertIn("-WindowStyle Hidden", content)
+                self.assertIn("Start-RubyOverlay.ps1", content)
+                self.assertIn('-State "samba"', content)
+                self.assertIn("-Height 640", content)
+                self.assertIn("-Rotate", content)
+            shortcut.unlink(missing_ok=True)
 
     def test_shipped_assets_include_samba_state(self):
         module = load_module()
@@ -153,6 +218,59 @@ class RubyOverlayMcpTests(unittest.TestCase):
         states = module.list_states(MODULE_PATH.parents[1] / "assets" / "frames")
 
         self.assertIn("samba", states)
+
+    def test_set_mode_dance_writes_dance_control_fields(self):
+        module = load_module()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            frame_root = root / "frames"
+            dance_dir = frame_root / "dance-samba"
+            dance_dir.mkdir(parents=True)
+            (dance_dir / "001.png").write_bytes(b"placeholder")
+            control_path = root / "control.json"
+            rotation_path = root / "rotation.json"
+            launcher = root / "Run-RubyOverlay.cmd"
+
+            server = module.RubyOverlayServer(control_path, rotation_path, frame_root, launcher)
+            server.call_tool(
+                "ruby_overlay_set_mode",
+                {
+                    "mode": "dance",
+                    "dance_state": "dance-samba",
+                    "dance_frame_interval_ms": 750,
+                },
+            )
+
+            control = json.loads(control_path.read_text(encoding="utf-8"))
+
+            self.assertEqual(control["mode"], "dance")
+            self.assertEqual(control["state"], "dance-samba")
+            self.assertEqual(control["danceState"], "dance-samba")
+            self.assertEqual(control["danceFrameIntervalMs"], 750)
+            self.assertFalse(control["rotate"])
+
+    def test_set_mode_assistant_writes_assistant_control_mode(self):
+        module = load_module()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            frame_root = root / "frames"
+            idle_dir = frame_root / "idle"
+            idle_dir.mkdir(parents=True)
+            (idle_dir / "001.png").write_bytes(b"placeholder")
+            control_path = root / "control.json"
+            rotation_path = root / "rotation.json"
+            launcher = root / "Run-RubyOverlay.cmd"
+
+            server = module.RubyOverlayServer(control_path, rotation_path, frame_root, launcher)
+            server.call_tool("ruby_overlay_set_mode", {"mode": "assistant"})
+
+            control = json.loads(control_path.read_text(encoding="utf-8"))
+
+            self.assertEqual(control["mode"], "assistant")
+            self.assertNotIn("danceState", control)
+            self.assertNotIn("danceFrameIntervalMs", control)
 
 
 if __name__ == "__main__":

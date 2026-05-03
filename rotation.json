@@ -2,6 +2,9 @@
   "enabled": true,
   "intervalMs": 30000,
   "frameIntervalMs": 9000,
+  "mode": "assistant",
+  "danceState": "",
+  "danceFrameIntervalMs": 750,
   "states": [
     "party",
     "belly dance",

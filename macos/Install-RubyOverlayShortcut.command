@@ -44,9 +44,9 @@ SHORTCUT="${DESKTOP}/${SAFE_NAME}.command"
   echo 'set -e'
   printf 'cd %q\n' "$PROJECT_ROOT"
   if [ "$ROTATE" = "1" ]; then
-    printf 'exec %q --height %q --state %q --rotate\n' "$PROJECT_ROOT/macos/Run-RubyOverlay.command" "$HEIGHT" "$STATE"
+    printf 'nohup %q --height %q --state %q --rotate >/dev/null 2>&1 &\n' "$PROJECT_ROOT/macos/Run-RubyOverlay.command" "$HEIGHT" "$STATE"
   else
-    printf 'exec %q --height %q --state %q\n' "$PROJECT_ROOT/macos/Run-RubyOverlay.command" "$HEIGHT" "$STATE"
+    printf 'nohup %q --height %q --state %q >/dev/null 2>&1 &\n' "$PROJECT_ROOT/macos/Run-RubyOverlay.command" "$HEIGHT" "$STATE"
   fi
 } > "$SHORTCUT"
 
