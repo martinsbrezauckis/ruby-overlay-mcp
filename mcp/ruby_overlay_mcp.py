@@ -139,46 +139,113 @@ def fetch_latest_release(repository: str) -> dict[str, Any]:
         return json.loads(response.read().decode("utf-8"))
 
 
+def fetch_latest_tag(repository: str) -> dict[str, Any]:
+    url = f"https://api.github.com/repos/{repository}/tags?per_page=1"
+    request = urllib.request.Request(
+        url,
+        headers={
+            "Accept": "application/vnd.github+json",
+            "User-Agent": f"RubyOverlay/{read_current_version()}",
+            "X-GitHub-Api-Version": "2022-11-28",
+        },
+    )
+    with urllib.request.urlopen(request, timeout=12) as response:
+        tags = json.loads(response.read().decode("utf-8"))
+    if isinstance(tags, list) and tags:
+        first_tag = tags[0]
+        if isinstance(first_tag, dict):
+            return first_tag
+    return {}
+
+
+def update_check_error_result(
+    checked_at: str,
+    repository: str,
+    current_version: str,
+    error: str,
+    release_url: str | None = None,
+) -> dict[str, Any]:
+    return {
+        "checkedAt": checked_at,
+        "currentVersion": current_version,
+        "error": error,
+        "latestVersion": None,
+        "releaseUrl": release_url,
+        "repository": repository,
+        "updateAvailable": False,
+    }
+
+
 def check_for_update(
     repository: str,
     current_version: str,
     fetch_latest_release=fetch_latest_release,
+    fetch_latest_tag=fetch_latest_tag,
 ) -> dict[str, Any]:
     checked_at = _datetime.datetime.now(_datetime.UTC).replace(microsecond=0).isoformat()
     try:
         release = fetch_latest_release(repository)
     except urllib.error.HTTPError as exc:
+        if exc.code != 404:
+            return update_check_error_result(
+                checked_at,
+                repository,
+                current_version,
+                f"GitHub release check failed: HTTP {exc.code}",
+            )
+        try:
+            tag = fetch_latest_tag(repository)
+        except urllib.error.HTTPError as tag_exc:
+            return update_check_error_result(
+                checked_at,
+                repository,
+                current_version,
+                f"GitHub tag fallback failed: HTTP {tag_exc.code}",
+            )
+        except Exception as tag_exc:
+            return update_check_error_result(
+                checked_at,
+                repository,
+                current_version,
+                f"GitHub tag fallback failed: {tag_exc}",
+            )
+
+        latest_version = str(tag.get("name") or "").strip()
+        if not latest_version:
+            return update_check_error_result(
+                checked_at,
+                repository,
+                current_version,
+                "No GitHub releases or tags found.",
+            )
+
         return {
             "checkedAt": checked_at,
             "currentVersion": current_version,
-            "error": f"GitHub release check failed: HTTP {exc.code}",
-            "latestVersion": None,
-            "releaseUrl": None,
+            "latestVersion": latest_version,
+            "releaseName": latest_version,
+            "releaseUrl": f"https://github.com/{repository}/tree/{latest_version}",
             "repository": repository,
-            "updateAvailable": False,
+            "updateAvailable": is_newer_version(latest_version, current_version),
+            "versionSource": "tag",
         }
     except Exception as exc:
-        return {
-            "checkedAt": checked_at,
-            "currentVersion": current_version,
-            "error": f"GitHub release check failed: {exc}",
-            "latestVersion": None,
-            "releaseUrl": None,
-            "repository": repository,
-            "updateAvailable": False,
-        }
+        return update_check_error_result(
+            checked_at,
+            repository,
+            current_version,
+            f"GitHub release check failed: {exc}",
+        )
 
     latest_version = str(release.get("tag_name") or release.get("name") or "").strip()
     if not latest_version:
-        return {
-            "checkedAt": checked_at,
-            "currentVersion": current_version,
-            "error": "Latest release did not include a tag_name.",
-            "latestVersion": None,
-            "releaseUrl": release.get("html_url"),
-            "repository": repository,
-            "updateAvailable": False,
-        }
+        return update_check_error_result(
+            checked_at,
+            repository,
+            current_version,
+            "Latest release did not include a tag_name.",
+            release.get("html_url"),
+        )
 
     return {
         "checkedAt": checked_at,
@@ -188,6 +255,7 @@ def check_for_update(
         "releaseUrl": release.get("html_url"),
         "repository": repository,
         "updateAvailable": is_newer_version(latest_version, current_version),
+        "versionSource": "release",
     }
 
 

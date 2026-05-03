@@ -1,5 +1,6 @@
 import importlib.util
 import unittest
+import urllib.error
 from pathlib import Path
 
 
@@ -41,6 +42,31 @@ class RubyOverlayMcpTests(unittest.TestCase):
         self.assertEqual(result["latestVersion"], "v0.2.0")
         self.assertTrue(result["updateAvailable"])
         self.assertEqual(result["releaseUrl"], "https://github.com/owner/repo/releases/tag/v0.2.0")
+
+    def test_check_update_falls_back_to_latest_tag_when_no_release_exists(self):
+        module = load_module()
+
+        class ReleaseNotFound(urllib.error.HTTPError):
+            def __init__(self):
+                Exception.__init__(self, "Not Found")
+                self.code = 404
+
+        def no_release(repository):
+            raise ReleaseNotFound()
+
+        result = module.check_for_update(
+            repository="owner/repo",
+            current_version="0.1.0",
+            fetch_latest_release=no_release,
+            fetch_latest_tag=lambda repository: {
+                "name": "v0.1.0",
+                "zipball_url": "https://api.github.com/repos/owner/repo/zipball/refs/tags/v0.1.0",
+            },
+        )
+
+        self.assertEqual(result["latestVersion"], "v0.1.0")
+        self.assertEqual(result["versionSource"], "tag")
+        self.assertFalse(result["updateAvailable"])
 
     def test_update_notice_prefers_update_state_and_keeps_rotation_order(self):
         module = load_module()

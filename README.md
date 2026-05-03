@@ -47,7 +47,7 @@ The included GitHub Actions workflow validates this macOS runner on a hosted mac
   "enabled": true,
   "intervalMs": 30000,
   "frameIntervalMs": 9000,
-  "states": ["party", "biker", "idle"]
+  "states": ["party", "belly dance", "biker", "idle"]
 }
 ```
 
@@ -55,7 +55,7 @@ The included GitHub Actions workflow validates this macOS runner on a hosted mac
 
 ## MCP
 
-The MCP server is `mcp/ruby_overlay_mcp.py`. It exposes tools to launch the widget, list available states, read/write `control.json`, read/write `rotation.json`, check for GitHub release updates, and create desktop shortcuts.
+The MCP server is `mcp/ruby_overlay_mcp.py`. It exposes tools to launch the widget, list available states, read/write `control.json`, read/write `rotation.json`, check for GitHub release/tag updates, and create desktop shortcuts.
 
 Example stdio command:
 
@@ -73,7 +73,7 @@ The MCP tool `ruby` is the short command alias for launching RubyOverlay. If you
 
 The local version is stored in `VERSION`. Update settings and the most recent check result live in `update.json`.
 
-Use the MCP tool `ruby_overlay_check_update` to compare the local version with the latest GitHub release. When a newer release exists, the tool can update `control.json` so Ruby temporarily shows an update notice state in the live rotation.
+Use the MCP tool `ruby_overlay_check_update` to compare the local version with the latest GitHub release, falling back to the newest Git tag when no release exists. When a newer version exists, the tool can update `control.json` so Ruby temporarily shows an update notice state in the live rotation.
 
 By default it looks for an `assets/frames/update` dataset. For compatibility with older installs it also recognizes `ruby-update`, then falls back to `deploy` and `party` if no update artwork is installed. The default and saved rotation lists exclude update-only states, so update artwork only appears when an update is available and the check tool applies the notice. When the installed version is current, the check removes update-only states from live and saved rotation.
 

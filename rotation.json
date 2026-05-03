@@ -4,6 +4,7 @@
   "frameIntervalMs": 9000,
   "states": [
     "party",
+    "belly dance",
     "biker",
     "rogue",
     "angel",

@@ -324,6 +324,7 @@ function Get-RubyStateGroupName {
 
     $cosplayStates = @(
         "angel",
+        "belly dance",
         "biker",
         "cheerleader",
         "elf",
@@ -472,7 +473,11 @@ function ConvertTo-RubyStateNames {
 function Get-RubyDefaultRotationStates {
     $preferred = @(
         "party",
+        "belly dance",
         "biker",
+        "rogue",
+        "angel",
+        "sorcerer",
         "idle",
         "waiting",
         "waving",

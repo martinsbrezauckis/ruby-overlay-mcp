@@ -519,7 +519,11 @@ final class RubyOverlayController: NSObject, NSApplicationDelegate {
     private func defaultRotationStates() -> [String] {
         let preferred = [
             "party",
+            "belly dance",
             "biker",
+            "rogue",
+            "angel",
+            "sorcerer",
             "idle",
             "waiting",
             "waving",
@@ -554,6 +558,7 @@ final class RubyOverlayController: NSObject, NSApplicationDelegate {
     private func stateGroupName(_ state: String) -> String {
         let cosplayStates = Set([
             "angel",
+            "belly dance",
             "biker",
             "cheerleader",
             "elf",
