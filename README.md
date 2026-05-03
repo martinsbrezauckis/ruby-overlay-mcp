@@ -22,7 +22,7 @@ Useful examples:
 .\Install-RubyOverlayShortcut.ps1
 ```
 
-Right-click the widget to change the state, auto-rotation, rotation states, frame timing, scale, always-on-top mode, or to close it.
+Right-click the widget to change the state, auto-rotation, rotation states, frame timing, scale, always-on-top mode, or to close it. State and rotation menus are grouped into Assistant and Cosplay submenus; rotation groups can be toggled on/off as a whole.
 
 ## macOS
 
@@ -75,7 +75,7 @@ The local version is stored in `VERSION`. Update settings and the most recent ch
 
 Use the MCP tool `ruby_overlay_check_update` to compare the local version with the latest GitHub release. When a newer release exists, the tool can update `control.json` so Ruby temporarily shows an update notice state in the live rotation.
 
-By default it looks for an `assets/frames/ruby-update` dataset. If that dataset is not installed yet, it falls back to `deploy` and then `party`. The default rotation list does not include `ruby-update`, so update artwork only appears when an update is available and the check tool applies the notice.
+By default it looks for an `assets/frames/update` dataset. For compatibility with older installs it also recognizes `ruby-update`, then falls back to `deploy` and `party` if no update artwork is installed. The default and saved rotation lists exclude update-only states, so update artwork only appears when an update is available and the check tool applies the notice. When the installed version is current, the check removes update-only states from live and saved rotation.
 
 ## What's Included
 

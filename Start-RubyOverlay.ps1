@@ -80,6 +80,7 @@ $script:frameIntervalMs = [Math]::Max(500, [Math]::Min(60000, $FrameIntervalMs))
 $script:rotationTimer = $null
 $script:rotateItem = $null
 $script:rotationStateItems = @{}
+$script:rotationGroupItems = @{}
 $script:rotationIntervalItems = @{}
 $script:rotationCurrentItem = $null
 $script:frameIntervalItems = @{}
@@ -269,6 +270,102 @@ function Get-RubyVisibleStateNames {
     return [string[]]$visible.ToArray()
 }
 
+function Test-RubyUpdateOnlyState {
+    param([string]$StateName)
+
+    return @("update", "ruby-update") -contains $StateName
+}
+
+function Remove-RubyUpdateOnlyStates {
+    param([object]$StateNames)
+
+    $selected = New-Object System.Collections.Generic.List[string]
+    $names = New-Object System.Collections.Generic.List[string]
+    if ($null -eq $StateNames) {
+        return @()
+    } elseif ($StateNames -is [string]) {
+        foreach ($item in ($StateNames -split ",")) {
+            $name = $item.Trim()
+            if (-not [string]::IsNullOrWhiteSpace($name)) {
+                $names.Add($name)
+            }
+        }
+    } elseif ($StateNames -is [System.Collections.IEnumerable]) {
+        foreach ($item in $StateNames) {
+            if ($null -ne $item) {
+                $name = ([string]$item).Trim()
+                if (-not [string]::IsNullOrWhiteSpace($name)) {
+                    $names.Add($name)
+                }
+            }
+        }
+    } else {
+        $singleName = ([string]$StateNames).Trim()
+        if (-not [string]::IsNullOrWhiteSpace($singleName)) {
+            $names.Add($singleName)
+        }
+    }
+
+    foreach ($name in $names) {
+        if (-not (Test-RubyUpdateOnlyState -StateName $name)) {
+            $selected.Add($name)
+        }
+    }
+
+    return [string[]]$selected.ToArray()
+}
+
+function Get-RubyVisibleRotationStateNames {
+    return [string[]]@(Remove-RubyUpdateOnlyStates -StateNames $script:visibleStateNames)
+}
+
+function Get-RubyStateGroupName {
+    param([string]$StateName)
+
+    $cosplayStates = @(
+        "angel",
+        "biker",
+        "cheerleader",
+        "elf",
+        "gala",
+        "halloween",
+        "rogue",
+        "sorcerer"
+    )
+
+    if ($cosplayStates -contains $StateName) {
+        return "Cosplay"
+    }
+
+    return "Assistant"
+}
+
+function Get-RubyGroupedStateNames {
+    param([object]$StateNames)
+
+    $groups = [ordered]@{
+        "Assistant" = New-Object System.Collections.Generic.List[string]
+        "Cosplay" = New-Object System.Collections.Generic.List[string]
+    }
+
+    foreach ($name in @(ConvertTo-RubyStateNames -Value $StateNames)) {
+        $groupName = Get-RubyStateGroupName -StateName $name
+        if (-not $groups.Contains($groupName)) {
+            $groups[$groupName] = New-Object System.Collections.Generic.List[string]
+        }
+        $groups[$groupName].Add($name)
+    }
+
+    $result = [ordered]@{}
+    foreach ($groupName in $groups.Keys) {
+        if ($groups[$groupName].Count -gt 0) {
+            $result[$groupName] = [string[]]$groups[$groupName].ToArray()
+        }
+    }
+
+    return $result
+}
+
 if ($ValidateOnly) {
     foreach ($name in $states.Keys) {
         $source = $script:frameSources[$name]
@@ -283,6 +380,7 @@ if ($ValidateOnly) {
 }
 
 $script:visibleStateNames = @(Get-RubyVisibleStateNames)
+$script:visibleRotationStateNames = @(Get-RubyVisibleRotationStateNames)
 $script:stateShortcutNames = @($script:visibleStateNames | Select-Object -First 9)
 
 $window = New-Object System.Windows.Window
@@ -394,13 +492,13 @@ function Get-RubyDefaultRotationStates {
 
     $selected = New-Object System.Collections.Generic.List[string]
     foreach ($name in $preferred) {
-        if ($states.Contains($name)) {
+        if ($states.Contains($name) -and -not (Test-RubyUpdateOnlyState -StateName $name)) {
             $selected.Add($name)
         }
     }
 
     foreach ($name in $states.Keys) {
-        if ($script:frameSources[$name].Kind -eq "frames" -and -not $selected.Contains($name)) {
+        if ($script:frameSources[$name].Kind -eq "frames" -and -not $selected.Contains($name) -and -not (Test-RubyUpdateOnlyState -StateName $name)) {
             $selected.Add($name)
         }
     }
@@ -465,6 +563,20 @@ function Update-RubyRotationMenu {
 
     if ($null -ne $script:frameCurrentItem) {
         $script:frameCurrentItem.Header = "Current: $(Format-RubyFrameInterval)"
+    }
+
+    foreach ($groupName in $script:rotationGroupItems.Keys) {
+        $entry = $script:rotationGroupItems[$groupName]
+        $groupStates = @($entry.States)
+        $includedCount = 0
+        foreach ($name in $groupStates) {
+            if ($script:rotationStates.Contains([string]$name)) {
+                $includedCount += 1
+            }
+        }
+        $entry.Item.Header = "All ($includedCount/$($groupStates.Count))"
+        $entry.Item.IsChecked = ($groupStates.Count -gt 0 -and $includedCount -eq $groupStates.Count)
+        $entry.Item.IsEnabled = $groupStates.Count -gt 0
     }
 
     foreach ($name in $script:rotationStateItems.Keys) {
@@ -645,7 +757,7 @@ function Save-RubyRotationConfig {
         enabled = [bool]$script:rotationEnabled
         intervalMs = [int]$script:rotationCycleIntervalMs
         frameIntervalMs = [int]$script:frameIntervalMs
-        states = @(Get-RubyRotationStateArray)
+        states = @(Remove-RubyUpdateOnlyStates -StateNames (Get-RubyRotationStateArray))
     }
 
     $directory = Split-Path -Parent $RotationConfigPath
@@ -748,6 +860,10 @@ function Set-RubyRotationStateIncluded {
         [bool]$Included
     )
 
+    if (Test-RubyUpdateOnlyState -StateName $StateName) {
+        return
+    }
+
     $nextStates = New-Object System.Collections.Generic.List[string]
     foreach ($name in $script:rotationStates) {
         if ($name -ne $StateName) {
@@ -757,6 +873,35 @@ function Set-RubyRotationStateIncluded {
 
     if ($Included -and $states.Contains($StateName)) {
         $nextStates.Add($StateName)
+    }
+
+    Set-RubyRotationStates -StateNames $nextStates -Save
+}
+
+function Set-RubyRotationGroupIncluded {
+    param(
+        [string]$GroupName,
+        [bool]$Included
+    )
+
+    if (-not $script:rotationGroupItems.ContainsKey($GroupName)) {
+        return
+    }
+
+    $groupStates = @($script:rotationGroupItems[$GroupName].States)
+    $nextStates = New-Object System.Collections.Generic.List[string]
+    foreach ($name in $script:rotationStates) {
+        if ($groupStates -notcontains $name -and -not $nextStates.Contains($name)) {
+            $nextStates.Add($name)
+        }
+    }
+
+    if ($Included) {
+        foreach ($name in $groupStates) {
+            if ($states.Contains($name) -and -not (Test-RubyUpdateOnlyState -StateName $name) -and -not $nextStates.Contains($name)) {
+                $nextStates.Add($name)
+            }
+        }
     }
 
     Set-RubyRotationStates -StateNames $nextStates -Save
@@ -798,7 +943,7 @@ function Load-RubyRotationConfig {
 
     Set-RubyRotationInterval -IntervalMs $interval
     Set-RubyFrameInterval -IntervalMs $frameInterval
-    Set-RubyRotationStates -StateNames $stateNames
+    Set-RubyRotationStates -StateNames (Remove-RubyUpdateOnlyStates -StateNames $stateNames)
     Set-RubyRotationEnabled -Enabled $enabled
 }
 
@@ -933,12 +1078,18 @@ Set-RubyRotationTimerState
 
 $contextMenu = New-Object System.Windows.Controls.ContextMenu
 
-foreach ($name in $script:visibleStateNames) {
-    $item = New-Object System.Windows.Controls.MenuItem
-    $item.Header = $name
-    $stateName = $name
-    $item.Add_Click({ Set-RubyState -NewState $stateName }.GetNewClosure())
-    [void]$contextMenu.Items.Add($item)
+$stateGroups = Get-RubyGroupedStateNames -StateNames $script:visibleStateNames
+foreach ($groupName in $stateGroups.Keys) {
+    $groupMenu = New-Object System.Windows.Controls.MenuItem
+    $groupMenu.Header = $groupName
+    foreach ($name in @($stateGroups[$groupName])) {
+        $item = New-Object System.Windows.Controls.MenuItem
+        $item.Header = $name
+        $stateName = $name
+        $item.Add_Click({ Set-RubyState -NewState $stateName }.GetNewClosure())
+        [void]$groupMenu.Items.Add($item)
+    }
+    [void]$contextMenu.Items.Add($groupMenu)
 }
 
 [void]$contextMenu.Items.Add((New-Object System.Windows.Controls.Separator))
@@ -955,20 +1106,45 @@ $script:rotateItem.Add_Click({
 
 $rotationStatesMenu = New-Object System.Windows.Controls.MenuItem
 $rotationStatesMenu.Header = "Rotation states"
-foreach ($name in $script:visibleStateNames) {
-    $item = New-Object System.Windows.Controls.MenuItem
-    $item.Header = $name
-    $item.IsCheckable = $true
-    $item.IsChecked = $script:rotationStates.Contains([string]$name)
-    $stateName = $name
-    $script:rotationStateItems[$stateName] = $item
-    $item.Add_Click({
+$rotationStateGroups = Get-RubyGroupedStateNames -StateNames $script:visibleRotationStateNames
+foreach ($groupName in $rotationStateGroups.Keys) {
+    $groupMenu = New-Object System.Windows.Controls.MenuItem
+    $groupMenu.Header = $groupName
+    $groupStates = [string[]]@($rotationStateGroups[$groupName])
+
+    $groupToggleItem = New-Object System.Windows.Controls.MenuItem
+    $groupToggleItem.Header = "All"
+    $groupToggleItem.IsCheckable = $true
+    $script:rotationGroupItems[$groupName] = @{
+        Item = $groupToggleItem
+        States = $groupStates
+    }
+    $rotationGroupName = $groupName
+    $groupToggleItem.Add_Click({
         param($sender, $eventArgs)
-        Set-RubyRotationStateIncluded -StateName $stateName -Included $sender.IsChecked
+        Set-RubyRotationGroupIncluded -GroupName $rotationGroupName -Included $sender.IsChecked
     }.GetNewClosure())
-    [void]$rotationStatesMenu.Items.Add($item)
+    [void]$groupMenu.Items.Add($groupToggleItem)
+    [void]$groupMenu.Items.Add((New-Object System.Windows.Controls.Separator))
+
+    foreach ($name in $groupStates) {
+        $item = New-Object System.Windows.Controls.MenuItem
+        $item.Header = $name
+        $item.IsCheckable = $true
+        $item.IsChecked = $script:rotationStates.Contains([string]$name)
+        $stateName = $name
+        $script:rotationStateItems[$stateName] = $item
+        $item.Add_Click({
+            param($sender, $eventArgs)
+            Set-RubyRotationStateIncluded -StateName $stateName -Included $sender.IsChecked
+        }.GetNewClosure())
+        [void]$groupMenu.Items.Add($item)
+    }
+
+    [void]$rotationStatesMenu.Items.Add($groupMenu)
 }
 [void]$contextMenu.Items.Add($rotationStatesMenu)
+Update-RubyRotationMenu
 
 $rotationIntervalMenu = New-Object System.Windows.Controls.MenuItem
 $rotationIntervalMenu.Header = "Rotation interval"

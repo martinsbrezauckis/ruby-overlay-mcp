@@ -29,8 +29,8 @@ DEFAULT_VERSION_PATH = PROJECT_ROOT / "VERSION"
 DEFAULT_FRAME_ROOT = PROJECT_ROOT / "assets" / "frames"
 DEFAULT_LAUNCHER = PROJECT_ROOT / ("Run-RubyOverlay.cmd" if os.name == "nt" else "macos/Run-RubyOverlay.command")
 DEFAULT_REPOSITORY = "martinsbrezauckis/ruby-overlay-mcp"
-DEFAULT_UPDATE_STATE = "ruby-update"
-DEFAULT_UPDATE_FALLBACK_STATES = ["deploy", "party"]
+DEFAULT_UPDATE_STATE = "update"
+DEFAULT_UPDATE_FALLBACK_STATES = ["ruby-update", "deploy", "party"]
 
 
 def write_response(message_id: Any, result: Any) -> None:
@@ -199,6 +199,29 @@ def updated_update_config(config: dict[str, Any], result: dict[str, Any]) -> dic
     return updated
 
 
+def update_notice_state_candidates(update_state: str, fallback_states: list[str]) -> list[str]:
+    candidates: list[str] = []
+
+    def add_candidate(candidate: str) -> None:
+        name = candidate.strip()
+        if name and name not in candidates:
+            candidates.append(name)
+
+    normalized = update_state.strip()
+    if normalized == "ruby-update":
+        add_candidate("update")
+        add_candidate("ruby-update")
+    else:
+        add_candidate(normalized or DEFAULT_UPDATE_STATE)
+        if normalized == "update":
+            add_candidate("ruby-update")
+
+    for fallback_state in fallback_states:
+        add_candidate(fallback_state)
+
+    return candidates
+
+
 def select_update_notice_states(
     available_states: list[str],
     current_rotation_states: list[str],
@@ -207,7 +230,7 @@ def select_update_notice_states(
 ) -> list[str]:
     available = set(available_states)
     notice_state = None
-    for candidate in [update_state, *fallback_states]:
+    for candidate in update_notice_state_candidates(update_state, fallback_states):
         if candidate in available:
             notice_state = candidate
             break
@@ -220,6 +243,25 @@ def select_update_notice_states(
         if state in available and state not in selected:
             selected.append(state)
     return selected
+
+
+def remove_update_notice_states(
+    current_rotation_states: list[str],
+    update_state: str,
+    fallback_states: list[str],
+) -> list[str]:
+    update_only = {"update", "ruby-update"}
+    configured_state = update_state.strip()
+    if configured_state:
+        update_only.add(configured_state)
+
+    return [state for state in current_rotation_states if state not in update_only]
+
+
+def as_string_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item) for item in value if item is not None]
 
 
 def text_result(text: str) -> dict[str, Any]:
@@ -445,21 +487,20 @@ class RubyOverlayServer:
             update_config = read_json_object(DEFAULT_UPDATE_CONFIG_PATH)
             repository = arguments.get("repository") or update_config.get("repository") or DEFAULT_REPOSITORY
             current_version = arguments.get("current_version") or read_current_version()
+            update_state = str(arguments.get("update_state") or update_config.get("updateState") or DEFAULT_UPDATE_STATE)
+            fallback_states = arguments.get("fallback_states") or update_config.get("fallbackStates") or DEFAULT_UPDATE_FALLBACK_STATES
+            if not isinstance(fallback_states, list) or not all(isinstance(item, str) for item in fallback_states):
+                raise ValueError("fallback_states must be an array of strings.")
+
             result = check_for_update(str(repository), str(current_version))
             write_json_object(DEFAULT_UPDATE_CONFIG_PATH, updated_update_config(update_config, result))
 
             if result["updateAvailable"] and arguments.get("apply_notice", True):
-                update_state = str(arguments.get("update_state") or update_config.get("updateState") or DEFAULT_UPDATE_STATE)
-                fallback_states = arguments.get("fallback_states") or update_config.get("fallbackStates") or DEFAULT_UPDATE_FALLBACK_STATES
-                if not isinstance(fallback_states, list) or not all(isinstance(item, str) for item in fallback_states):
-                    raise ValueError("fallback_states must be an array of strings.")
                 rotation = read_json_object(self.rotation_config_path)
-                current_rotation_states = rotation.get("states", [])
-                if not isinstance(current_rotation_states, list):
-                    current_rotation_states = []
+                current_rotation_states = as_string_list(rotation.get("states", []))
                 notice_states = select_update_notice_states(
                     available_states,
-                    [str(state) for state in current_rotation_states],
+                    current_rotation_states,
                     update_state,
                     fallback_states,
                 )
@@ -477,6 +518,38 @@ class RubyOverlayServer:
                     )
                     result["noticeStates"] = notice_states
 
+            elif arguments.get("apply_notice", True):
+                rotation = read_json_object(self.rotation_config_path)
+                current_rotation_states = as_string_list(rotation.get("states", []))
+                cleaned_rotation_states = remove_update_notice_states(
+                    current_rotation_states,
+                    update_state,
+                    fallback_states,
+                )
+                if cleaned_rotation_states != current_rotation_states:
+                    write_rotation_config(self.rotation_config_path, {"states": cleaned_rotation_states})
+                    result["rotationStates"] = cleaned_rotation_states
+
+                control = read_control(self.control_path)
+                control_rotation_states = as_string_list(control.get("rotationStates", []))
+                cleaned_control_states = remove_update_notice_states(
+                    control_rotation_states,
+                    update_state,
+                    fallback_states,
+                )
+                control_patch: dict[str, Any] = {
+                    "updateAvailable": False,
+                    "latestVersion": result["latestVersion"],
+                    "releaseUrl": result["releaseUrl"],
+                }
+                if cleaned_control_states != control_rotation_states:
+                    control_patch["rotationStates"] = cleaned_control_states
+                    result["noticeStates"] = cleaned_control_states
+                current_control_state = str(control.get("state") or "")
+                if current_control_state in {"update", "ruby-update", update_state} and cleaned_control_states:
+                    control_patch["state"] = cleaned_control_states[0]
+                write_control(self.control_path, control_patch)
+
             return text_result(json.dumps(result, indent=2, sort_keys=True))
 
         if name == "ruby_overlay_set_rotation":
@@ -484,6 +557,7 @@ class RubyOverlayServer:
             if states_arg is not None:
                 if not isinstance(states_arg, list) or not all(isinstance(item, str) for item in states_arg):
                     raise ValueError("states must be an array of strings.")
+                states_arg = remove_update_notice_states(states_arg, DEFAULT_UPDATE_STATE, DEFAULT_UPDATE_FALLBACK_STATES)
                 validate_state_names(states_arg, available_states)
             interval_ms = arguments.get("interval_ms")
             frame_interval_ms = arguments.get("frame_interval_ms")

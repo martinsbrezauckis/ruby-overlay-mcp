@@ -66,6 +66,29 @@ class RubyOverlayMcpTests(unittest.TestCase):
 
         self.assertEqual(states, ["deploy", "party", "review"])
 
+    def test_update_notice_accepts_new_update_dataset_when_old_config_name_is_used(self):
+        module = load_module()
+
+        states = module.select_update_notice_states(
+            available_states=["party", "update", "review"],
+            current_rotation_states=["party", "review"],
+            update_state="ruby-update",
+            fallback_states=["deploy"],
+        )
+
+        self.assertEqual(states, ["update", "party", "review"])
+
+    def test_update_notice_states_are_removed_when_installed_version_is_current(self):
+        module = load_module()
+
+        states = module.remove_update_notice_states(
+            current_rotation_states=["update", "party", "ruby-update", "review"],
+            update_state="update",
+            fallback_states=["ruby-update", "deploy"],
+        )
+
+        self.assertEqual(states, ["party", "review"])
+
     def test_update_result_preserves_update_configuration(self):
         module = load_module()
 

@@ -166,6 +166,10 @@ final class RubyOverlayController: NSObject, NSApplicationDelegate {
         return visible.isEmpty ? stateOrder : visible
     }
 
+    private var visibleRotationStateOrder: [String] {
+        visibleStateOrder.filter { !isUpdateOnlyState($0) }
+    }
+
     private var controlPath: URL {
         args.controlPath ?? args.projectRoot.appendingPathComponent("control.json")
     }
@@ -508,7 +512,7 @@ final class RubyOverlayController: NSObject, NSApplicationDelegate {
 
         setRotationInterval(interval, save: false)
         setFrameInterval(frameInterval, save: false)
-        setRotationStates(states, save: false)
+        setRotationStates(removeUpdateOnlyStates(states), save: false)
         setRotationEnabled(enabled, save: false)
     }
 
@@ -532,11 +536,45 @@ final class RubyOverlayController: NSObject, NSApplicationDelegate {
             "playfull",
             "personal attention"
         ]
-        var result = preferred.filter { frameSources.keys.contains($0) }
-        for state in stateOrder where frameSources[state]?.kind == "frames" && !result.contains(state) {
+        var result = preferred.filter { frameSources.keys.contains($0) && !isUpdateOnlyState($0) }
+        for state in stateOrder where frameSources[state]?.kind == "frames" && !result.contains(state) && !isUpdateOnlyState(state) {
             result.append(state)
         }
         return result
+    }
+
+    private func isUpdateOnlyState(_ state: String) -> Bool {
+        state == "update" || state == "ruby-update"
+    }
+
+    private func removeUpdateOnlyStates(_ states: [String]) -> [String] {
+        states.filter { !isUpdateOnlyState($0) }
+    }
+
+    private func stateGroupName(_ state: String) -> String {
+        let cosplayStates = Set([
+            "angel",
+            "biker",
+            "cheerleader",
+            "elf",
+            "gala",
+            "halloween",
+            "rogue",
+            "sorcerer"
+        ])
+        return cosplayStates.contains(state) ? "Cosplay" : "Assistant"
+    }
+
+    private func groupedStates(_ states: [String]) -> [(String, [String])] {
+        let orderedGroups = ["Assistant", "Cosplay"]
+        var groups: [String: [String]] = [:]
+        for state in states {
+            groups[stateGroupName(state), default: []].append(state)
+        }
+        return orderedGroups.compactMap { group in
+            guard let states = groups[group], !states.isEmpty else { return nil }
+            return (group, states)
+        }
     }
 
     private func setRotationEnabled(_ enabled: Bool, save: Bool) {
@@ -592,7 +630,7 @@ final class RubyOverlayController: NSObject, NSApplicationDelegate {
             "enabled": rotationEnabled,
             "intervalMs": rotationIntervalMs,
             "frameIntervalMs": frameIntervalMs,
-            "states": rotationStates
+            "states": removeUpdateOnlyStates(rotationStates)
         ]
         guard let data = try? JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys]) else {
             return
@@ -603,11 +641,17 @@ final class RubyOverlayController: NSObject, NSApplicationDelegate {
 
     func makeContextMenu() -> NSMenu {
         let menu = NSMenu()
-        for state in visibleStateOrder {
-            let item = NSMenuItem(title: state, action: #selector(selectState(_:)), keyEquivalent: "")
-            item.target = self
-            item.representedObject = state
-            menu.addItem(item)
+        for (groupName, states) in groupedStates(visibleStateOrder) {
+            let groupMenu = NSMenu()
+            for state in states {
+                let item = NSMenuItem(title: state, action: #selector(selectState(_:)), keyEquivalent: "")
+                item.target = self
+                item.representedObject = state
+                groupMenu.addItem(item)
+            }
+            let groupItem = NSMenuItem(title: groupName, action: nil, keyEquivalent: "")
+            groupItem.submenu = groupMenu
+            menu.addItem(groupItem)
         }
 
         menu.addItem(.separator())
@@ -619,12 +663,27 @@ final class RubyOverlayController: NSObject, NSApplicationDelegate {
         menu.addItem(rotateItem)
 
         let rotationStatesMenu = NSMenu()
-        for state in visibleStateOrder {
-            let item = NSMenuItem(title: state, action: #selector(toggleRotationState(_:)), keyEquivalent: "")
-            item.target = self
-            item.representedObject = state
-            item.state = rotationStates.contains(state) ? .on : .off
-            rotationStatesMenu.addItem(item)
+        for (groupName, states) in groupedStates(visibleRotationStateOrder) {
+            let groupMenu = NSMenu()
+            let selectedCount = states.filter { rotationStates.contains($0) }.count
+            let allItem = NSMenuItem(title: "All (\(selectedCount)/\(states.count))", action: #selector(toggleRotationGroup(_:)), keyEquivalent: "")
+            allItem.target = self
+            allItem.representedObject = states
+            allItem.state = selectedCount == states.count ? .on : .off
+            groupMenu.addItem(allItem)
+            groupMenu.addItem(.separator())
+
+            for state in states {
+                let item = NSMenuItem(title: state, action: #selector(toggleRotationState(_:)), keyEquivalent: "")
+                item.target = self
+                item.representedObject = state
+                item.state = rotationStates.contains(state) ? .on : .off
+                groupMenu.addItem(item)
+            }
+
+            let groupItem = NSMenuItem(title: groupName, action: nil, keyEquivalent: "")
+            groupItem.submenu = groupMenu
+            rotationStatesMenu.addItem(groupItem)
         }
         let rotationStatesItem = NSMenuItem(title: "Rotation states", action: nil, keyEquivalent: "")
         rotationStatesItem.submenu = rotationStatesMenu
@@ -705,9 +764,23 @@ final class RubyOverlayController: NSObject, NSApplicationDelegate {
 
     @objc private func toggleRotationState(_ sender: NSMenuItem) {
         guard let state = sender.representedObject as? String else { return }
+        guard !isUpdateOnlyState(state) else { return }
         var next = rotationStates.filter { $0 != state }
         if !rotationStates.contains(state) {
             next.append(state)
+        }
+        setRotationStates(next, save: true)
+    }
+
+    @objc private func toggleRotationGroup(_ sender: NSMenuItem) {
+        guard let states = sender.representedObject as? [String] else { return }
+        let cleanStates = removeUpdateOnlyStates(states)
+        let allSelected = cleanStates.allSatisfy { rotationStates.contains($0) }
+        var next = rotationStates.filter { !cleanStates.contains($0) }
+        if !allSelected {
+            for state in cleanStates where frameSources.keys.contains(state) && !next.contains(state) {
+                next.append(state)
+            }
         }
         setRotationStates(next, save: true)
     }
