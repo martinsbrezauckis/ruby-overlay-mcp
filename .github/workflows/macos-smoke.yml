@@ -1,0 +1,94 @@
+name: macOS smoke
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Validate macOS runner and MCP
+    runs-on: macos-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Show tool versions
+        run: |
+          sw_vers
+          swiftc --version
+          python3 --version
+
+      - name: Validate macOS overlay assets
+        run: |
+          chmod +x macos/Run-RubyOverlay.command
+          ./macos/Run-RubyOverlay.command --validate-only
+
+      - name: Smoke test MCP server
+        run: |
+          python3 -m py_compile mcp/ruby_overlay_mcp.py
+          python3 - <<'PY'
+          import json
+          import subprocess
+          import sys
+
+          messages = [
+              {
+                  "jsonrpc": "2.0",
+                  "id": 1,
+                  "method": "initialize",
+                  "params": {
+                      "protocolVersion": "2024-11-05",
+                      "capabilities": {},
+                      "clientInfo": {"name": "github-actions", "version": "1"},
+                  },
+              },
+              {
+                  "jsonrpc": "2.0",
+                  "id": 2,
+                  "method": "tools/call",
+                  "params": {"name": "ruby_overlay_list_states", "arguments": {}},
+              },
+              {
+                  "jsonrpc": "2.0",
+                  "id": 3,
+                  "method": "tools/call",
+                  "params": {"name": "ruby_overlay_get_rotation", "arguments": {}},
+              },
+          ]
+
+          payload = "\n".join(json.dumps(message) for message in messages) + "\n"
+          result = subprocess.run(
+              [sys.executable, "mcp/ruby_overlay_mcp.py"],
+              input=payload,
+              text=True,
+              capture_output=True,
+              check=True,
+          )
+
+          responses = [json.loads(line) for line in result.stdout.splitlines()]
+          if len(responses) != 3:
+              raise SystemExit(f"Expected 3 MCP responses, got {len(responses)}: {result.stdout}")
+
+          state_text = responses[1]["result"]["content"][0]["text"]
+          states = json.loads(state_text)["states"]
+          expected_states = {"biker", "rogue", "angel", "sorcerer"}
+          missing_states = sorted(expected_states.difference(states))
+          if missing_states:
+              raise SystemExit(f"Expected state(s) missing from MCP state list: {missing_states}; got {states}")
+
+          rotation_text = responses[2]["result"]["content"][0]["text"]
+          rotation = json.loads(rotation_text)
+          if rotation.get("frameIntervalMs") != 9000:
+              raise SystemExit(f"Unexpected frameIntervalMs: {rotation}")
+          missing_rotation_states = sorted(expected_states.difference(rotation.get("states", [])))
+          if missing_rotation_states:
+              raise SystemExit(f"Expected state(s) missing from rotation config: {missing_rotation_states}; got {rotation}")
+
+          print("MCP smoke test OK")
+          PY

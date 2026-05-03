@@ -1,0 +1,27 @@
+{
+  "enabled": true,
+  "intervalMs": 30000,
+  "frameIntervalMs": 9000,
+  "states": [
+    "party",
+    "biker",
+    "rogue",
+    "angel",
+    "sorcerer",
+    "idle",
+    "waiting",
+    "waving",
+    "review",
+    "code review ready",
+    "debugging",
+    "deploy",
+    "cheerleader",
+    "gala",
+    "elf",
+    "halloween",
+    "jumping",
+    "failed",
+    "playfull",
+    "personal attention"
+  ]
+}
