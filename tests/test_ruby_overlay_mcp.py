@@ -153,6 +153,7 @@ class RubyOverlayMcpTests(unittest.TestCase):
         self.assertIn("ruby_overlay_create_shortcut", tool_names)
         self.assertIn("ruby_overlay_set_mode", tool_names)
 
+    @unittest.skipUnless(os.name == "nt", "Windows shortcut behavior is covered on Windows")
     def test_mcp_windows_shortcut_uses_detached_hidden_powershell(self):
         module = load_module()
 
