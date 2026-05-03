@@ -84,7 +84,7 @@ jobs:
 
           state_text = responses[1]["result"]["content"][0]["text"]
           states = json.loads(state_text)["states"]
-          expected_states = {"biker", "rogue", "angel", "sorcerer", "update"}
+          expected_states = {"belly dance", "samba", "biker", "rogue", "angel", "sorcerer", "update"}
           missing_states = sorted(expected_states.difference(states))
           if missing_states:
               raise SystemExit(f"Expected state(s) missing from MCP state list: {missing_states}; got {states}")

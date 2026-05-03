@@ -147,6 +147,13 @@ class RubyOverlayMcpTests(unittest.TestCase):
         self.assertIn("ruby_overlay_check_update", tool_names)
         self.assertIn("ruby_overlay_create_shortcut", tool_names)
 
+    def test_shipped_assets_include_samba_state(self):
+        module = load_module()
+
+        states = module.list_states(MODULE_PATH.parents[1] / "assets" / "frames")
+
+        self.assertIn("samba", states)
+
 
 if __name__ == "__main__":
     unittest.main()

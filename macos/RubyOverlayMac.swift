@@ -22,6 +22,10 @@ struct Arguments {
     var animationDelayMultiplier = 7.5
     var controlPath: URL?
     var rotationConfigPath: URL?
+    var updateConfigPath: URL?
+    var versionPath: URL?
+    var updateApiBaseUrl = "https://api.github.com"
+    var disableUpdateCheck = false
     var rotate = false
     var rotateStates = ""
     var rotationIntervalMs = 0
@@ -56,6 +60,14 @@ struct Arguments {
                 if let next = value() { controlPath = URL(fileURLWithPath: next).standardizedFileURL }
             case "--rotation-config":
                 if let next = value() { rotationConfigPath = URL(fileURLWithPath: next).standardizedFileURL }
+            case "--update-config":
+                if let next = value() { updateConfigPath = URL(fileURLWithPath: next).standardizedFileURL }
+            case "--version-path":
+                if let next = value() { versionPath = URL(fileURLWithPath: next).standardizedFileURL }
+            case "--update-api-base-url":
+                if let next = value() { updateApiBaseUrl = next }
+            case "--disable-update-check":
+                disableUpdateCheck = true
             case "--rotate":
                 rotate = true
             case "--rotate-states":
@@ -178,6 +190,14 @@ final class RubyOverlayController: NSObject, NSApplicationDelegate {
         args.rotationConfigPath ?? args.projectRoot.appendingPathComponent("rotation.json")
     }
 
+    private var updateConfigPath: URL {
+        args.updateConfigPath ?? args.projectRoot.appendingPathComponent("update.json")
+    }
+
+    private var versionPath: URL {
+        args.versionPath ?? args.projectRoot.appendingPathComponent("VERSION")
+    }
+
     init(arguments: Arguments) {
         self.args = arguments
         self.currentState = arguments.state
@@ -214,6 +234,7 @@ final class RubyOverlayController: NSObject, NSApplicationDelegate {
         scheduleFrameTimer()
         scheduleRotationTimer()
         startPolling()
+        startStartupUpdateCheck()
 
         if args.closeAfterMs > 0 {
             Timer.scheduledTimer(withTimeInterval: Double(args.closeAfterMs) / 1000.0, repeats: false) { _ in
@@ -520,6 +541,7 @@ final class RubyOverlayController: NSObject, NSApplicationDelegate {
         let preferred = [
             "party",
             "belly dance",
+            "samba",
             "biker",
             "rogue",
             "angel",
@@ -565,6 +587,7 @@ final class RubyOverlayController: NSObject, NSApplicationDelegate {
             "gala",
             "halloween",
             "rogue",
+            "samba",
             "sorcerer"
         ])
         return cosplayStates.contains(state) ? "Cosplay" : "Assistant"
@@ -642,6 +665,251 @@ final class RubyOverlayController: NSObject, NSApplicationDelegate {
         }
         try? data.write(to: rotationConfigPath)
         lastRotationDate = modificationDate(rotationConfigPath)
+    }
+
+    private func startStartupUpdateCheck() {
+        guard !args.disableUpdateCheck else { return }
+        let updateURL = updateConfigPath
+        let versionURL = versionPath
+        let controlURL = controlPath
+        let rotationURL = rotationConfigPath
+        let framesURL = frameRoot
+        let apiBase = args.updateApiBaseUrl.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            guard let self else { return }
+            var updateConfig = self.readObject(updateURL) ?? [:]
+            if let enabled = self.boolValue(updateConfig["enabled"]), !enabled {
+                return
+            }
+
+            let configuredRepository = (updateConfig["repository"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let repository = configuredRepository.isEmpty ? "martinsbrezauckis/ruby-overlay-mcp" : configuredRepository
+            let currentVersion = self.readVersion(versionURL)
+            let updateState = (updateConfig["updateState"] as? String) ?? "update"
+            let fallbackStates = self.stateArray(updateConfig["fallbackStates"] ?? ["ruby-update", "deploy", "party"])
+            let result = self.checkForUpdate(
+                repository: repository,
+                currentVersion: currentVersion,
+                apiBase: apiBase
+            )
+
+            if updateConfig["repository"] == nil {
+                updateConfig["repository"] = repository
+            }
+            updateConfig["lastCheck"] = result
+            self.writeObject(updateConfig, to: updateURL)
+
+            guard self.boolValue(result["updateAvailable"]) == true else { return }
+            let availableStates = self.availableFrameStates(in: framesURL)
+            let rotationConfig = self.readObject(rotationURL) ?? [:]
+            let rotationStates = self.stateArray(rotationConfig["states"] ?? [])
+            let noticeStates = self.selectUpdateNoticeStates(
+                availableStates: availableStates,
+                currentRotationStates: rotationStates,
+                updateState: updateState,
+                fallbackStates: fallbackStates
+            )
+            guard !noticeStates.isEmpty else { return }
+
+            var control = self.readObject(controlURL) ?? [:]
+            control["state"] = noticeStates[0]
+            control["rotate"] = true
+            control["rotationStates"] = noticeStates
+            control["updateAvailable"] = true
+            control["latestVersion"] = result["latestVersion"]
+            control["releaseUrl"] = result["releaseUrl"]
+            self.writeObject(control, to: controlURL)
+        }
+    }
+
+    private func checkForUpdate(repository: String, currentVersion: String, apiBase: String) -> [String: Any] {
+        let checkedAt = ISO8601DateFormatter().string(from: Date())
+        do {
+            let release = try fetchGitHubObject("\(apiBase)/repos/\(repository)/releases/latest")
+            let latestVersion = ((release["tag_name"] as? String) ?? (release["name"] as? String) ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !latestVersion.isEmpty else {
+                return updateError(repository: repository, currentVersion: currentVersion, error: "Latest release did not include a tag_name.", releaseUrl: release["html_url"] as? String)
+            }
+            return [
+                "checkedAt": checkedAt,
+                "currentVersion": currentVersion,
+                "latestVersion": latestVersion,
+                "releaseName": release["name"] ?? NSNull(),
+                "releaseUrl": release["html_url"] ?? NSNull(),
+                "repository": repository,
+                "updateAvailable": isNewerVersion(latestVersion, than: currentVersion),
+                "versionSource": "release"
+            ]
+        } catch UpdateFetchError.httpStatus(let status) where status == 404 {
+            do {
+                let tags = try fetchGitHubArray("\(apiBase)/repos/\(repository)/tags?per_page=1")
+                let tag = tags.first ?? [:]
+                let latestVersion = (tag["name"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !latestVersion.isEmpty else {
+                    return updateError(repository: repository, currentVersion: currentVersion, error: "No GitHub releases or tags found.")
+                }
+                return [
+                    "checkedAt": checkedAt,
+                    "currentVersion": currentVersion,
+                    "latestVersion": latestVersion,
+                    "releaseName": latestVersion,
+                    "releaseUrl": "https://github.com/\(repository)/tree/\(latestVersion)",
+                    "repository": repository,
+                    "updateAvailable": isNewerVersion(latestVersion, than: currentVersion),
+                    "versionSource": "tag"
+                ]
+            } catch {
+                return updateError(repository: repository, currentVersion: currentVersion, error: "GitHub tag fallback failed: \(error.localizedDescription)")
+            }
+        } catch UpdateFetchError.httpStatus(let status) {
+            return updateError(repository: repository, currentVersion: currentVersion, error: "GitHub release check failed: HTTP \(status)")
+        } catch {
+            return updateError(repository: repository, currentVersion: currentVersion, error: "GitHub release check failed: \(error.localizedDescription)")
+        }
+    }
+
+    private enum UpdateFetchError: Error {
+        case timeout
+        case httpStatus(Int)
+        case invalidJSON
+    }
+
+    private func fetchGitHubObject(_ urlString: String) throws -> [String: Any] {
+        let object = try fetchGitHubJSON(urlString)
+        guard let dictionary = object as? [String: Any] else { throw UpdateFetchError.invalidJSON }
+        return dictionary
+    }
+
+    private func fetchGitHubArray(_ urlString: String) throws -> [[String: Any]] {
+        let object = try fetchGitHubJSON(urlString)
+        guard let array = object as? [[String: Any]] else { throw UpdateFetchError.invalidJSON }
+        return array
+    }
+
+    private func fetchGitHubJSON(_ urlString: String) throws -> Any {
+        guard let url = URL(string: urlString) else { throw UpdateFetchError.invalidJSON }
+        var request = URLRequest(url: url)
+        request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+        request.setValue("RubyOverlay/\(readVersion(versionPath))", forHTTPHeaderField: "User-Agent")
+        request.setValue("2022-11-28", forHTTPHeaderField: "X-GitHub-Api-Version")
+
+        let semaphore = DispatchSemaphore(value: 0)
+        var responseData: Data?
+        var responseStatus: Int?
+        var responseError: Error?
+        URLSession.shared.dataTask(with: request) { data, response, error in
+            responseData = data
+            responseStatus = (response as? HTTPURLResponse)?.statusCode
+            responseError = error
+            semaphore.signal()
+        }.resume()
+
+        if semaphore.wait(timeout: .now() + 12) == .timedOut {
+            throw UpdateFetchError.timeout
+        }
+        if let responseError {
+            throw responseError
+        }
+        if let responseStatus, !(200..<300).contains(responseStatus) {
+            throw UpdateFetchError.httpStatus(responseStatus)
+        }
+        guard let responseData,
+              let object = try? JSONSerialization.jsonObject(with: responseData) else {
+            throw UpdateFetchError.invalidJSON
+        }
+        return object
+    }
+
+    private func updateError(repository: String, currentVersion: String, error: String, releaseUrl: String? = nil) -> [String: Any] {
+        [
+            "checkedAt": ISO8601DateFormatter().string(from: Date()),
+            "currentVersion": currentVersion,
+            "error": error,
+            "latestVersion": NSNull(),
+            "releaseUrl": releaseUrl ?? NSNull(),
+            "repository": repository,
+            "updateAvailable": false
+        ]
+    }
+
+    private func readVersion(_ url: URL) -> String {
+        guard let text = try? String(contentsOf: url, encoding: .utf8) else { return "0.0.0" }
+        let version = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return version.isEmpty ? "0.0.0" : version
+    }
+
+    private func versionParts(_ version: String) -> [Int] {
+        var raw = version.trimmingCharacters(in: .whitespacesAndNewlines)
+        if raw.lowercased().hasPrefix("v") {
+            raw.removeFirst()
+        }
+        raw = raw.components(separatedBy: "+").first ?? raw
+        raw = raw.components(separatedBy: "-").first ?? raw
+        var parts = raw.split(separator: ".").map { segment -> Int in
+            let digits = segment.prefix { $0.isNumber }
+            return Int(digits) ?? 0
+        }
+        while parts.count < 3 {
+            parts.append(0)
+        }
+        return parts
+    }
+
+    private func isNewerVersion(_ latestVersion: String, than currentVersion: String) -> Bool {
+        let latest = versionParts(latestVersion)
+        let current = versionParts(currentVersion)
+        for index in 0..<max(latest.count, current.count) {
+            let latestPart = index < latest.count ? latest[index] : 0
+            let currentPart = index < current.count ? current[index] : 0
+            if latestPart > currentPart { return true }
+            if latestPart < currentPart { return false }
+        }
+        return false
+    }
+
+    private func availableFrameStates(in root: URL) -> [String] {
+        guard let entries = try? fileManager.contentsOfDirectory(at: root, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]) else {
+            return []
+        }
+        return entries.compactMap { entry in
+            guard (try? entry.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true else { return nil }
+            guard let files = try? fileManager.contentsOfDirectory(at: entry, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]) else { return nil }
+            return files.contains { supportedExtensions.contains($0.pathExtension.lowercased()) } ? entry.lastPathComponent : nil
+        }.sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
+    }
+
+    private func selectUpdateNoticeStates(availableStates: [String], currentRotationStates: [String], updateState: String, fallbackStates: [String]) -> [String] {
+        let available = Set(availableStates)
+        var candidates: [String] = []
+        func addCandidate(_ value: String) {
+            let name = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !name.isEmpty && !candidates.contains(name) {
+                candidates.append(name)
+            }
+        }
+
+        let normalized = updateState.trimmingCharacters(in: .whitespacesAndNewlines)
+        if normalized == "ruby-update" {
+            addCandidate("update")
+            addCandidate("ruby-update")
+        } else {
+            addCandidate(normalized.isEmpty ? "update" : normalized)
+            if normalized == "update" {
+                addCandidate("ruby-update")
+            }
+        }
+        fallbackStates.forEach(addCandidate)
+
+        var selected: [String] = []
+        if let notice = candidates.first(where: { available.contains($0) }) {
+            selected.append(notice)
+        }
+        for state in currentRotationStates where available.contains(state) && !selected.contains(state) {
+            selected.append(state)
+        }
+        return selected
     }
 
     func makeContextMenu() -> NSMenu {
@@ -917,6 +1185,17 @@ final class RubyOverlayController: NSObject, NSApplicationDelegate {
             return nil
         }
         return dictionary
+    }
+
+    private func writeObject(_ object: [String: Any], to url: URL) {
+        do {
+            let directory = url.deletingLastPathComponent()
+            try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+            let data = try JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys])
+            try data.write(to: url)
+        } catch {
+            return
+        }
     }
 
     private func modificationDate(_ url: URL) -> Date? {

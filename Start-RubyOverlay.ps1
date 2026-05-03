@@ -12,6 +12,10 @@ param(
     [string]$RotateStates = "",
     [int]$RotationIntervalMs = 0,
     [int]$FrameIntervalMs = 9000,
+    [string]$UpdateConfigPath = (Join-Path $PSScriptRoot "update.json"),
+    [string]$VersionPath = (Join-Path $PSScriptRoot "VERSION"),
+    [string]$UpdateApiBaseUrl = "https://api.github.com",
+    [switch]$DisableUpdateCheck,
     [switch]$ValidateOnly,
     [int]$CloseAfterMs = 0
 )
@@ -331,6 +335,7 @@ function Get-RubyStateGroupName {
         "gala",
         "halloween",
         "rogue",
+        "samba",
         "sorcerer"
     )
 
@@ -474,6 +479,7 @@ function Get-RubyDefaultRotationStates {
     $preferred = @(
         "party",
         "belly dance",
+        "samba",
         "biker",
         "rogue",
         "angel",
@@ -1048,6 +1054,378 @@ function Apply-RubyControl {
     }
 }
 
+function Start-RubyStartupUpdateCheck {
+    if ($DisableUpdateCheck) {
+        return
+    }
+
+    $jobScript = {
+        param(
+            [string]$JobUpdateConfigPath,
+            [string]$JobVersionPath,
+            [string]$JobControlPath,
+            [string]$JobRotationConfigPath,
+            [string]$JobFrameRoot,
+            [string]$JobUpdateApiBaseUrl
+        )
+
+        function Read-JsonObject {
+            param([string]$Path)
+
+            if (-not (Test-Path -LiteralPath $Path)) {
+                return $null
+            }
+            try {
+                $value = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
+                if ($null -ne $value -and $value -is [pscustomobject]) {
+                    return $value
+                }
+            } catch {
+                return $null
+            }
+            return $null
+        }
+
+        function ConvertTo-Hashtable {
+            param([object]$Value)
+
+            $result = [ordered]@{}
+            if ($null -eq $Value) {
+                return $result
+            }
+            foreach ($property in $Value.PSObject.Properties) {
+                $result[$property.Name] = $property.Value
+            }
+            return $result
+        }
+
+        function Write-JsonObject {
+            param(
+                [string]$Path,
+                [object]$Value
+            )
+
+            $directory = Split-Path -Parent $Path
+            if (-not [string]::IsNullOrWhiteSpace($directory) -and -not (Test-Path -LiteralPath $directory)) {
+                New-Item -ItemType Directory -Force -Path $directory | Out-Null
+            }
+            $Value | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $Path -Encoding UTF8
+        }
+
+        function Get-CurrentVersion {
+            param([string]$Path)
+
+            if (-not (Test-Path -LiteralPath $Path)) {
+                return "0.0.0"
+            }
+            $version = (Get-Content -LiteralPath $Path -Raw).Trim()
+            if ([string]::IsNullOrWhiteSpace($version)) {
+                return "0.0.0"
+            }
+            return $version
+        }
+
+        function Get-VersionParts {
+            param([string]$Version)
+
+            $raw = $Version.Trim()
+            if ($raw.StartsWith("v", [System.StringComparison]::OrdinalIgnoreCase)) {
+                $raw = $raw.Substring(1)
+            }
+            $raw = ($raw -split "\+", 2)[0]
+            $raw = ($raw -split "-", 2)[0]
+            $parts = New-Object System.Collections.Generic.List[int]
+            foreach ($segment in ($raw -split "\.")) {
+                $match = [regex]::Match($segment, "^\d+")
+                if ($match.Success) {
+                    $parts.Add([int]$match.Value)
+                } else {
+                    $parts.Add(0)
+                }
+            }
+            while ($parts.Count -lt 3) {
+                $parts.Add(0)
+            }
+            return [int[]]$parts.ToArray()
+        }
+
+        function Test-NewerVersion {
+            param(
+                [string]$LatestVersion,
+                [string]$CurrentVersion
+            )
+
+            $latest = @(Get-VersionParts -Version $LatestVersion)
+            $current = @(Get-VersionParts -Version $CurrentVersion)
+            $length = [Math]::Max($latest.Count, $current.Count)
+            for ($index = 0; $index -lt $length; $index++) {
+                $latestPart = if ($index -lt $latest.Count) { $latest[$index] } else { 0 }
+                $currentPart = if ($index -lt $current.Count) { $current[$index] } else { 0 }
+                if ($latestPart -gt $currentPart) {
+                    return $true
+                }
+                if ($latestPart -lt $currentPart) {
+                    return $false
+                }
+            }
+            return $false
+        }
+
+        function Get-StringList {
+            param([object]$Value)
+
+            $result = New-Object System.Collections.Generic.List[string]
+            if ($null -eq $Value) {
+                return [string[]]@()
+            }
+            if ($Value -is [string]) {
+                foreach ($item in ($Value -split ",")) {
+                    $name = $item.Trim()
+                    if (-not [string]::IsNullOrWhiteSpace($name)) {
+                        $result.Add($name)
+                    }
+                }
+            } elseif ($Value -is [System.Collections.IEnumerable]) {
+                foreach ($item in $Value) {
+                    if ($null -ne $item) {
+                        $name = ([string]$item).Trim()
+                        if (-not [string]::IsNullOrWhiteSpace($name)) {
+                            $result.Add($name)
+                        }
+                    }
+                }
+            }
+            return [string[]]$result.ToArray()
+        }
+
+        function Add-UniqueString {
+            param(
+                [System.Collections.Generic.List[string]]$List,
+                [string]$Value
+            )
+
+            $name = $Value.Trim()
+            if (-not [string]::IsNullOrWhiteSpace($name) -and -not $List.Contains($name)) {
+                $List.Add($name)
+            }
+        }
+
+        function Get-AvailableFrameStates {
+            param([string]$Root)
+
+            $result = New-Object System.Collections.Generic.List[string]
+            $extensions = @(".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff")
+            if (-not (Test-Path -LiteralPath $Root)) {
+                return [string[]]@()
+            }
+            Get-ChildItem -LiteralPath $Root -Directory | Sort-Object Name | ForEach-Object {
+                $hasFrames = @(Get-ChildItem -LiteralPath $_.FullName -File | Where-Object {
+                    $extensions -contains $_.Extension.ToLowerInvariant()
+                }).Count -gt 0
+                if ($hasFrames) {
+                    $result.Add($_.Name)
+                }
+            }
+            return [string[]]$result.ToArray()
+        }
+
+        function Get-UpdateNoticeCandidates {
+            param(
+                [string]$UpdateState,
+                [string[]]$FallbackStates
+            )
+
+            $candidates = New-Object System.Collections.Generic.List[string]
+            $normalized = $UpdateState.Trim()
+            if ($normalized -eq "ruby-update") {
+                Add-UniqueString -List $candidates -Value "update"
+                Add-UniqueString -List $candidates -Value "ruby-update"
+            } else {
+                Add-UniqueString -List $candidates -Value $(if ($normalized) { $normalized } else { "update" })
+                if ($normalized -eq "update") {
+                    Add-UniqueString -List $candidates -Value "ruby-update"
+                }
+            }
+            foreach ($fallbackState in $FallbackStates) {
+                Add-UniqueString -List $candidates -Value $fallbackState
+            }
+            return [string[]]$candidates.ToArray()
+        }
+
+        function Select-UpdateNoticeStates {
+            param(
+                [string[]]$AvailableStates,
+                [string[]]$CurrentRotationStates,
+                [string]$UpdateState,
+                [string[]]$FallbackStates
+            )
+
+            $selected = New-Object System.Collections.Generic.List[string]
+            $noticeState = $null
+            foreach ($candidate in (Get-UpdateNoticeCandidates -UpdateState $UpdateState -FallbackStates $FallbackStates)) {
+                if ($AvailableStates -contains $candidate) {
+                    $noticeState = $candidate
+                    break
+                }
+            }
+            if ($null -ne $noticeState) {
+                Add-UniqueString -List $selected -Value $noticeState
+            }
+            foreach ($state in $CurrentRotationStates) {
+                if ($AvailableStates -contains $state) {
+                    Add-UniqueString -List $selected -Value $state
+                }
+            }
+            return [string[]]$selected.ToArray()
+        }
+
+        function New-ErrorResult {
+            param(
+                [string]$Repository,
+                [string]$CurrentVersion,
+                [string]$ErrorMessage
+            )
+
+            return [ordered]@{
+                checkedAt = [DateTime]::UtcNow.ToString("o")
+                currentVersion = $CurrentVersion
+                error = $ErrorMessage
+                latestVersion = $null
+                releaseUrl = $null
+                repository = $Repository
+                updateAvailable = $false
+            }
+        }
+
+        function Invoke-GitHubJson {
+            param([string]$Url)
+
+            return Invoke-RestMethod -Uri $Url -Headers @{
+                Accept = "application/vnd.github+json"
+                "User-Agent" = "RubyOverlay/$(Get-CurrentVersion -Path $JobVersionPath)"
+                "X-GitHub-Api-Version" = "2022-11-28"
+            } -TimeoutSec 12
+        }
+
+        try {
+            $configObject = Read-JsonObject -Path $JobUpdateConfigPath
+            $config = ConvertTo-Hashtable -Value $configObject
+            if ($config.Contains("enabled") -and -not [bool]$config["enabled"]) {
+                return
+            }
+
+            $repository = if ($config.Contains("repository") -and -not [string]::IsNullOrWhiteSpace([string]$config["repository"])) {
+                [string]$config["repository"]
+            } else {
+                "martinsbrezauckis/ruby-overlay-mcp"
+            }
+            $currentVersion = Get-CurrentVersion -Path $JobVersionPath
+            $updateState = if ($config.Contains("updateState")) { [string]$config["updateState"] } else { "update" }
+            $fallbackStates = if ($config.Contains("fallbackStates")) {
+                @(Get-StringList -Value $config["fallbackStates"])
+            } else {
+                @("ruby-update", "deploy", "party")
+            }
+            $apiBase = $JobUpdateApiBaseUrl.TrimEnd("/")
+            $checkedAt = [DateTime]::UtcNow.ToString("o")
+
+            $result = $null
+            try {
+                $release = Invoke-GitHubJson -Url "$apiBase/repos/$repository/releases/latest"
+                $latestVersion = ([string]$(if ($release.tag_name) { $release.tag_name } else { $release.name })).Trim()
+                if ([string]::IsNullOrWhiteSpace($latestVersion)) {
+                    $result = New-ErrorResult -Repository $repository -CurrentVersion $currentVersion -ErrorMessage "Latest release did not include a tag_name."
+                    $result.releaseUrl = $release.html_url
+                } else {
+                    $result = [ordered]@{
+                        checkedAt = $checkedAt
+                        currentVersion = $currentVersion
+                        latestVersion = $latestVersion
+                        releaseName = $release.name
+                        releaseUrl = $release.html_url
+                        repository = $repository
+                        updateAvailable = (Test-NewerVersion -LatestVersion $latestVersion -CurrentVersion $currentVersion)
+                        versionSource = "release"
+                    }
+                }
+            } catch {
+                $statusCode = $null
+                if ($null -ne $_.Exception.Response) {
+                    try { $statusCode = [int]$_.Exception.Response.StatusCode } catch { $statusCode = $null }
+                }
+                if ($statusCode -ne 404) {
+                    $message = if ($null -ne $statusCode) { "GitHub release check failed: HTTP $statusCode" } else { "GitHub release check failed: $($_.Exception.Message)" }
+                    $result = New-ErrorResult -Repository $repository -CurrentVersion $currentVersion -ErrorMessage $message
+                } else {
+                    try {
+                        $tags = @(Invoke-GitHubJson -Url "$apiBase/repos/$repository/tags?per_page=1")
+                        $tag = if ($tags.Count -gt 0) { $tags[0] } else { $null }
+                        $latestVersion = if ($null -ne $tag) { ([string]$tag.name).Trim() } else { "" }
+                        if ([string]::IsNullOrWhiteSpace($latestVersion)) {
+                            $result = New-ErrorResult -Repository $repository -CurrentVersion $currentVersion -ErrorMessage "No GitHub releases or tags found."
+                        } else {
+                            $result = [ordered]@{
+                                checkedAt = $checkedAt
+                                currentVersion = $currentVersion
+                                latestVersion = $latestVersion
+                                releaseName = $latestVersion
+                                releaseUrl = "https://github.com/$repository/tree/$latestVersion"
+                                repository = $repository
+                                updateAvailable = (Test-NewerVersion -LatestVersion $latestVersion -CurrentVersion $currentVersion)
+                                versionSource = "tag"
+                            }
+                        }
+                    } catch {
+                        $result = New-ErrorResult -Repository $repository -CurrentVersion $currentVersion -ErrorMessage "GitHub tag fallback failed: $($_.Exception.Message)"
+                    }
+                }
+            }
+
+            if (-not $config.Contains("repository")) {
+                $config["repository"] = $repository
+            }
+            $config["lastCheck"] = $result
+            Write-JsonObject -Path $JobUpdateConfigPath -Value $config
+
+            if ([bool]$result.updateAvailable) {
+                $availableStates = @(Get-AvailableFrameStates -Root $JobFrameRoot)
+                $rotationConfig = Read-JsonObject -Path $JobRotationConfigPath
+                $currentRotationStates = if ($null -ne $rotationConfig) {
+                    @(Get-StringList -Value $rotationConfig.states)
+                } else {
+                    @()
+                }
+                $noticeStates = @(Select-UpdateNoticeStates -AvailableStates $availableStates -CurrentRotationStates $currentRotationStates -UpdateState $updateState -FallbackStates $fallbackStates)
+                if ($noticeStates.Count -gt 0) {
+                    $control = ConvertTo-Hashtable -Value (Read-JsonObject -Path $JobControlPath)
+                    $control["state"] = $noticeStates[0]
+                    $control["rotate"] = $true
+                    $control["rotationStates"] = $noticeStates
+                    $control["updateAvailable"] = $true
+                    $control["latestVersion"] = $result.latestVersion
+                    $control["releaseUrl"] = $result.releaseUrl
+                    Write-JsonObject -Path $JobControlPath -Value $control
+                }
+            }
+        } catch {
+            # Startup update checks must never prevent the widget from running.
+        }
+    }
+
+    try {
+        Start-Job -ScriptBlock $jobScript -ArgumentList @(
+            $UpdateConfigPath,
+            $VersionPath,
+            $ControlPath,
+            $RotationConfigPath,
+            $FrameRoot,
+            $UpdateApiBaseUrl
+        ) | Out-Null
+    } catch {
+        # Startup update checks are best-effort only.
+    }
+}
+
 Load-RubyRotationConfig
 if ($PSBoundParameters.ContainsKey("RotationIntervalMs") -and $RotationIntervalMs -gt 0) {
     Set-RubyRotationInterval -IntervalMs $RotationIntervalMs
@@ -1244,6 +1622,8 @@ $rotationConfigTimer.Add_Tick({
     Apply-RubyRotationConfig
 })
 $rotationConfigTimer.Start()
+
+Start-RubyStartupUpdateCheck
 
 $image.Add_MouseLeftButtonDown({
     param($sender, $eventArgs)

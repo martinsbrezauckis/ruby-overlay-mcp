@@ -18,6 +18,7 @@ Useful examples:
 .\Run-RubyOverlay.cmd -Height 800 -State party -Rotate
 .\Run-RubyOverlay.cmd -Height 800 -State biker -Left 980 -Top 80
 .\Run-RubyOverlay.cmd -Height 800 -State party -Rotate -RotationIntervalMs 30000 -FrameIntervalMs 9000
+.\Run-RubyOverlay.cmd -DisableUpdateCheck
 .\Run-RubyOverlay.cmd -ValidateOnly
 .\Install-RubyOverlayShortcut.ps1
 ```
@@ -33,6 +34,7 @@ xcode-select --install
 chmod +x macos/Run-RubyOverlay.command macos/Install-RubyOverlayShortcut.command
 ./macos/Run-RubyOverlay.command --validate-only
 ./macos/Run-RubyOverlay.command --state party --height 800 --rotate
+./macos/Run-RubyOverlay.command --disable-update-check
 ./macos/Install-RubyOverlayShortcut.command
 ```
 
@@ -47,7 +49,7 @@ The included GitHub Actions workflow validates this macOS runner on a hosted mac
   "enabled": true,
   "intervalMs": 30000,
   "frameIntervalMs": 9000,
-  "states": ["party", "belly dance", "biker", "idle"]
+  "states": ["party", "belly dance", "samba", "biker", "idle"]
 }
 ```
 
@@ -73,7 +75,9 @@ The MCP tool `ruby` is the short command alias for launching RubyOverlay. If you
 
 The local version is stored in `VERSION`. Update settings and the most recent check result live in `update.json`.
 
-Use the MCP tool `ruby_overlay_check_update` to compare the local version with the latest GitHub release, falling back to the newest Git tag when no release exists. When a newer version exists, the tool can update `control.json` so Ruby temporarily shows an update notice state in the live rotation.
+RubyOverlay checks for updates once on startup, after the window opens. It compares the local version with the latest GitHub release, falling back to the newest Git tag when no release exists. When a newer version exists, the widget writes `control.json` so Ruby temporarily shows an update notice state in the live rotation. Use `-DisableUpdateCheck` on Windows or `--disable-update-check` on macOS to opt out.
+
+The MCP tool `ruby_overlay_check_update` runs the same check on demand while Ruby is already running.
 
 By default it looks for an `assets/frames/update` dataset. For compatibility with older installs it also recognizes `ruby-update`, then falls back to `deploy` and `party` if no update artwork is installed. The default and saved rotation lists exclude update-only states, so update artwork only appears when an update is available and the check tool applies the notice. When the installed version is current, the check removes update-only states from live and saved rotation.
 
