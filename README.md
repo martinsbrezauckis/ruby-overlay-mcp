@@ -1,4 +1,4 @@
-﻿# RubyOverlay
+# RubyOverlay
 
 Transparent desktop companion widget for Codex-style presentations.
 
